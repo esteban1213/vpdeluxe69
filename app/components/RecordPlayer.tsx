@@ -720,15 +720,7 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
         onScrub={handleScrub}
         onScrubEnd={handleScrubEnd}
       />
-      {spotifyAuthed ? (
-        <button
-          className="spotify-signout"
-          onClick={signOutSpotify}
-          disabled={busy}
-        >
-          Sign out of Spotify
-        </button>
-      ) : (
+      {spotifyAuthed ? null : (
         <button
           className="spotify-connect"
           onClick={() => beginSpotifyLogin()}
