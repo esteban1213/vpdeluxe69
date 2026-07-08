@@ -704,6 +704,22 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
         progress={progress}
         visible={!!loadedAlbum && status !== "stopped"}
       />
+
+      <Turntable
+        album={loadedAlbum}
+        status={status}
+        busy={busy}
+        albumProgress={albumProgress}
+        platterRef={platterRef}
+        carouselVisible={carouselVisible}
+        onSeek={seekTrack}
+        onPlay={play}
+        onPause={pause}
+        onStop={stop}
+        onToggleCarousel={toggleCarousel}
+        onScrub={handleScrub}
+        onScrubEnd={handleScrubEnd}
+      />
       {spotifyAuthed ? (
         <button
           className="spotify-signout"
@@ -720,21 +736,6 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
           Connect Spotify
         </button>
       )}
-      <Turntable
-        album={loadedAlbum}
-        status={status}
-        busy={busy}
-        albumProgress={albumProgress}
-        platterRef={platterRef}
-        carouselVisible={carouselVisible}
-        onSeek={seekTrack}
-        onPlay={play}
-        onPause={pause}
-        onStop={stop}
-        onToggleCarousel={toggleCarousel}
-        onScrub={handleScrub}
-        onScrubEnd={handleScrubEnd}
-      />
       <AlbumCarousel
         albums={albums}
         hiddenDiscIds={hiddenDiscIds}
