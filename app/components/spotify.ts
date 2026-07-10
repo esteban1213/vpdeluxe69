@@ -202,7 +202,7 @@ type PlaylistSummary = {
 type PlaylistItemsResponse = {
   items: {
     is_local: boolean;
-    item: { name: string; uri: string } | null;
+    item: { name: string; uri: string; preview_url: string | null } | null;
   }[];
 };
 
@@ -217,13 +217,16 @@ async function playlistToAlbum(
   playlist: PlaylistSummary,
 ): Promise<PlaylistAlbum> {
   const itemsRes = await apiGet<PlaylistItemsResponse>(
-    `/playlists/${playlist.id}/items?limit=50&fields=items(is_local,item(name,uri))`,
+    `/playlists/${playlist.id}/items?limit=50&fields=items(is_local,item(name,uri,preview_url))`,
   );
   const tracks = itemsRes.items
     .filter((entry) => entry.item && !entry.is_local)
     .map((entry) => ({
       title: entry.item!.name,
       spotifyUri: entry.item!.uri,
+      ...(entry.item!.preview_url
+        ? { previewUrl: entry.item!.preview_url }
+        : {}),
     }));
   return {
     id: `spotify-playlist-${playlist.id}`,

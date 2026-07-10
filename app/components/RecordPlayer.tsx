@@ -22,6 +22,9 @@ export type Track = {
   url?: string;
   /** Spotify track: URI, open.spotify.com link, or bare ID (needs Premium) */
   spotifyUri?: string;
+  /** 30-second preview MP3 — used as fallback when the Web Playback SDK is
+   *  unavailable (e.g. iOS Safari / any mobile browser) */
+  previewUrl?: string;
 };
 
 export type Album = {
@@ -88,7 +91,12 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
   const flightAlbum = flight ? albums[flight.index] : undefined;
   const busy = flight !== null || pendingIndex !== null;
   const currentTrack = loadedAlbum?.tracks[trackIndex];
-  const isSpotifyTrack = !!currentTrack?.spotifyUri;
+  // The Web Playback SDK is desktop-only. On mobile browsers it never fires
+  // "ready", so spotifyReady stays false. Detect that and route Spotify
+  // tracks through the preview URL + plain <audio> instead — same path the
+  // crackle uses, so iOS gesture trust is identical.
+  const useSpotifySDK = spotifyReady;
+  const isSpotifyTrack = !!currentTrack?.spotifyUri && useSpotifySDK;
   const albumProgress = loadedAlbum
     ? (trackIndex + progress) / loadedAlbum.tracks.length
     : 0;
@@ -147,6 +155,43 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
     scheduleCarouselAutoHide();
     return clearCarouselAutoHide;
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // iOS Safari locks every <audio> element until it sees a successful play()
+  // inside a direct user gesture. Install a one-shot listener on the very
+  // first tap anywhere on the page — earlier and more trusted than any
+  // button inside the app — to silently unlock the main audio element so
+  // that every later needle-drop play() is just resuming an already-blessed
+  // element rather than making its own unlock attempt.
+  useEffect(() => {
+    let unlocked = false;
+    const unlock = () => {
+      if (unlocked) return;
+      unlocked = true;
+      document.removeEventListener("touchstart", unlock, { capture: true });
+      document.removeEventListener("mousedown", unlock, { capture: true });
+      const audio = audioRef.current;
+      if (!audio) return;
+      audio.muted = true;
+      audio
+        .play()
+        .then(() => {
+          audio.pause();
+          audio.muted = false;
+        })
+        .catch(() => {
+          audio.muted = false;
+        });
+    };
+    document.addEventListener("touchstart", unlock, {
+      capture: true,
+      passive: true,
+    });
+    document.addEventListener("mousedown", unlock, { capture: true });
+    return () => {
+      document.removeEventListener("touchstart", unlock, { capture: true });
+      document.removeEventListener("mousedown", unlock, { capture: true });
+    };
   }, []);
 
   // Guard against a throttled Spotify scrub seek firing after unmount
@@ -229,17 +274,20 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
   // Drive whichever engine the current track needs; keep the other silent
   useEffect(() => {
     if (!currentTrack) return;
-    if (currentTrack.spotifyUri) {
+    if (isSpotifyTrack) {
       audioRef.current?.pause();
       if (status === "playing") {
-        startOrResumeSpotify(currentTrack.spotifyUri);
+        startOrResumeSpotify(currentTrack.spotifyUri!);
       }
-    } else if (currentTrack.url) {
+    } else {
+      // Resolve the audio source: explicit url, or Spotify preview fallback
+      // when the Web Playback SDK isn't available (all mobile browsers).
+      const src = currentTrack.url ?? currentTrack.previewUrl;
       spotifyRef.current?.pause();
       const audio = audioRef.current;
-      if (!audio) return;
-      if (audio.src !== currentTrack.url) {
-        audio.src = currentTrack.url;
+      if (!audio || !src) return;
+      if (audio.src !== src) {
+        audio.src = src;
       }
       if (status === "playing") {
         audio.muted = false;
@@ -360,7 +408,9 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
           spotifyLastPosRef.current = 0;
         } else {
           const audio = audioRef.current;
-          if (audio && track?.url) {
+          const trackSrc =
+            track?.url ?? (!useSpotifySDK ? track?.previewUrl : undefined);
+          if (audio && trackSrc) {
             // Pre-load the src here, well before the needle drop, instead
             // of at play() time — matching how the crackle clip (a static
             // src from mount) always succeeds on iOS. Assigning .src and
@@ -370,7 +420,7 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
             // play() even though it's technically still gesture-synchronous.
             // Giving the element a stable, already-loaded src ahead of time
             // sidesteps that race entirely.
-            audio.src = track.url;
+            audio.src = trackSrc;
             audio.currentTime = 0;
             audio.muted = false;
           }
@@ -573,12 +623,13 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
   // `status` and waiting for the effect to notice.
   const seekTrack = (index: number) => {
     if (!loadedAlbum || busy || !tableOn) return;
-    // Resolved directly from the index param, not the `currentTrack`
-    // state var — that still reflects the *old* trackIndex until the
-    // setTrackIndex below actually commits and re-renders.
     const track = loadedAlbum.tracks[index];
+    const trackIsSpotify = !!track.spotifyUri && useSpotifySDK;
+    const audioSrc =
+      track.url ?? (!trackIsSpotify ? track.previewUrl : undefined);
+
     if (index === trackIndex) {
-      if (track.spotifyUri) {
+      if (trackIsSpotify) {
         spotifyRef.current?.seek(0);
       } else if (audioRef.current) {
         audioRef.current.currentTime = 0;
@@ -589,12 +640,12 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
     setProgress(0);
     playCrackle();
     setStatus("playing");
-    if (track.spotifyUri) {
-      startOrResumeSpotify(track.spotifyUri);
-    } else if (track.url) {
+    if (trackIsSpotify) {
+      startOrResumeSpotify(track.spotifyUri!);
+    } else if (audioSrc) {
       const audio = audioRef.current;
       if (audio) {
-        if (audio.src !== track.url) audio.src = track.url;
+        if (audio.src !== audioSrc) audio.src = audioSrc;
         audio.muted = false;
         audioPlayCommittedRef.current = true;
         audio.play().catch(() => {
@@ -614,11 +665,12 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
     if (!loadedAlbum || busy || !tableOn) return;
     playCrackle();
     setStatus("playing");
-    if (currentTrack?.spotifyUri) {
-      startOrResumeSpotify(currentTrack.spotifyUri);
-    } else if (currentTrack?.url) {
+    if (isSpotifyTrack) {
+      startOrResumeSpotify(currentTrack!.spotifyUri!);
+    } else {
+      const audioSrc = currentTrack?.url ?? currentTrack?.previewUrl;
       const audio = audioRef.current;
-      if (audio) {
+      if (audio && audioSrc) {
         audio.muted = false;
         audioPlayCommittedRef.current = true;
         audio.play().catch(() => {
