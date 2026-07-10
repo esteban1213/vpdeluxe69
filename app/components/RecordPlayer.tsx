@@ -59,6 +59,10 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
   const spotifyScrubTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+  // Set to true the moment real playback begins (needle drop / resume) so
+  // that the async prime-cleanup callback in primeAudioForIOS can skip its
+  // audio.pause() when the real play() already beat it to the punch.
+  const audioPlayCommittedRef = useRef(false);
   const carouselHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [loadedIndex, setLoadedIndex] = useState<number | null>(null);
   const [pendingIndex, setPendingIndex] = useState<number | null>(null);
@@ -533,13 +537,20 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
   const primeAudioForIOS = () => {
     const audio = audioRef.current;
     if (!audio) return;
+    audioPlayCommittedRef.current = false;
     const wasMuted = audio.muted;
     audio.muted = true;
     const playPromise = audio.play();
     if (playPromise && typeof playPromise.then === "function") {
       playPromise
         .then(() => {
-          audio.pause();
+          // Only kill the prime-play if real playback hasn't already
+          // started — on a fast mobile tap the needle-drop's play() can
+          // fire before this .then() resolves, and pausing here would
+          // silently cancel the song even though the crackle keeps going.
+          if (!audioPlayCommittedRef.current) {
+            audio.pause();
+          }
           audio.muted = wasMuted;
         })
         .catch(() => {
@@ -585,7 +596,9 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
       if (audio) {
         if (audio.src !== track.url) audio.src = track.url;
         audio.muted = false;
+        audioPlayCommittedRef.current = true;
         audio.play().catch(() => {
+          audioPlayCommittedRef.current = false;
           stopCrackle();
           setStatus("stopped");
         });
@@ -607,7 +620,9 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
       const audio = audioRef.current;
       if (audio) {
         audio.muted = false;
+        audioPlayCommittedRef.current = true;
         audio.play().catch(() => {
+          audioPlayCommittedRef.current = false;
           stopCrackle();
           setStatus("stopped");
         });
