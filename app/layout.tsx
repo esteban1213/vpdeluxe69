@@ -18,15 +18,23 @@ const bitcountSingle = Bitcount_Single({
 });
 
 export const metadata: Metadata = {
-  title: "Digital Record Player",
+  title: "Vinny Records",
   description: "A digital record player.",
   // The web manifest (app/manifest.ts) covers Android/desktop install icons,
   // but iOS ignores it entirely for "Add to Home Screen" — Safari only
   // looks at apple-touch-icon links, so those are set here explicitly.
   icons: {
     icon: [
-      { url: "/android/launchericon-192x192.png", sizes: "192x192", type: "image/png" },
-      { url: "/android/launchericon-512x512.png", sizes: "512x512", type: "image/png" },
+      {
+        url: "/android/launchericon-192x192.png",
+        sizes: "192x192",
+        type: "image/png",
+      },
+      {
+        url: "/android/launchericon-512x512.png",
+        sizes: "512x512",
+        type: "image/png",
+      },
     ],
     apple: [
       { url: "/ios/120.png", sizes: "120x120", type: "image/png" },

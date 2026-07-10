@@ -594,17 +594,24 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
     if (playPromise && typeof playPromise.then === "function") {
       playPromise
         .then(() => {
-          // Only kill the prime-play if real playback hasn't already
+          // Only undo the prime-play if real playback hasn't already
           // started — on a fast mobile tap the needle-drop's play() can
-          // fire before this .then() resolves, and pausing here would
-          // silently cancel the song even though the crackle keeps going.
+          // fire before this .then() resolves, and pausing/re-muting here
+          // would silently cancel or mute the song even though the crackle
+          // keeps going. Restoring `wasMuted` after a commit is also unsafe
+          // on its own: overlapping prime calls (Power button + tonearm
+          // grab) can capture a stale `muted` snapshot from each other,
+          // so once committed just leave whatever mute state the real
+          // play() call already set.
           if (!audioPlayCommittedRef.current) {
             audio.pause();
+            audio.muted = wasMuted;
           }
-          audio.muted = wasMuted;
         })
         .catch(() => {
-          audio.muted = wasMuted;
+          if (!audioPlayCommittedRef.current) {
+            audio.muted = wasMuted;
+          }
         });
     } else {
       audio.muted = wasMuted;
