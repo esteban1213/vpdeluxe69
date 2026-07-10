@@ -38,6 +38,15 @@ export default function AlbumCarousel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeAlbum]);
 
+  // Nothing to browse yet (e.g. before Spotify login finishes, or login
+  // never happens). Swiper's cards effect assumes at least one slide
+  // exists — mounting it with zero can throw during init, which in dev
+  // surfaces as a full-viewport error overlay that eats clicks elsewhere
+  // on the page until it clears. Simplest fix: don't mount it at all yet.
+  if (albums.length === 0) {
+    return null;
+  }
+
   return (
     <div
       className="album-carousel"
