@@ -3,7 +3,6 @@ import type { PointerEvent as ReactPointerEvent, RefObject } from "react";
 import type { Album, PlaybackStatus } from "./RecordPlayer";
 import { RECORD_TO_PLATTER_RATIO } from "./RecordPlayer";
 import TimeDisplay from "./TimeDisplay";
-import MixerKnob from "./MixerKnob";
 
 type Props = {
   album?: Album;
@@ -15,8 +14,6 @@ type Props = {
   platterRef: RefObject<HTMLDivElement | null>;
   /** Whether the platter motor is running (spins the record, no sound) */
   tableOn: boolean;
-  /** Master playback volume, 0..1 */
-  volume: number;
   /** Fired the instant the needle is grabbed — primes the audio element
    *  for iOS, which needs playback "unlocked" by a direct gesture before
    *  any later programmatic play() call is allowed to succeed */
@@ -28,7 +25,6 @@ type Props = {
   /** Drop the needle onto the rest groove — halts playback */
   onStop: () => void;
   onToggleTable: () => void;
-  onVolumeChange: (value: number) => void;
   /** Nudge the current track's playback position by this many seconds */
   onScrub: (deltaSeconds: number) => void;
   /** Fires once a disc-scrub gesture ends, e.g. to flush a throttled seek */
@@ -189,13 +185,11 @@ export default function Turntable({
   elapsedSeconds,
   platterRef,
   tableOn,
-  volume,
   onPrimeAudio,
   onSeek,
   onResume,
   onStop,
   onToggleTable,
-  onVolumeChange,
   onScrub,
   onScrubEnd,
 }: Props) {
@@ -421,6 +415,10 @@ export default function Turntable({
       className="turntable"
       onClick={(e) => e.stopPropagation()}
     >
+      <span className="turntable-screw turntable-screw-tl" />
+      <span className="turntable-screw turntable-screw-tr" />
+      <span className="turntable-screw turntable-screw-bl" />
+      <span className="turntable-screw turntable-screw-br" />
       <div
         className="deck"
         ref={deckRef}
@@ -493,24 +491,17 @@ export default function Turntable({
             {drag.snap.label}
           </div>
         )}
-      </div>
-      <div className="mixer-panel">
-        <div className="controls">
-          <MixerKnob
-            label="Volume"
-            value={volume}
-            onChange={onVolumeChange}
+        {/* Bottom-right of the deck, sharing the tonearm's horizontal
+            position above — pivot and Power form one column beside the disc. */}
+        <div className="control-with-caption power-control">
+          <button
+            onClick={onToggleTable}
+            disabled={!album || busy}
+            data-pressed={tableOn}
+            aria-pressed={tableOn}
+            aria-label={tableOn ? "Power off" : "Power on"}
           />
-          <div className="control-with-caption">
-            <button
-              onClick={onToggleTable}
-              disabled={!album || busy}
-              data-pressed={tableOn}
-              aria-pressed={tableOn}
-              aria-label={tableOn ? "Stop turntable" : "Start turntable"}
-            />
-            <span className="control-caption">Start</span>
-          </div>
+          <span className="control-caption">Power</span>
         </div>
       </div>
     </div>

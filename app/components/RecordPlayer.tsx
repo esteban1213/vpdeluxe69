@@ -67,8 +67,6 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
   const [tableOn, setTableOn] = useState(false);
   const [trackIndex, setTrackIndex] = useState(0);
   const [progress, setProgress] = useState(0);
-  // Master playback volume fader.
-  const [volume, setVolume] = useState(1);
   const [spotifyAuthed, setSpotifyAuthed] = useState(false);
   const [spotifyReady, setSpotifyReady] = useState(false);
   const [spotifyAlbums, setSpotifyAlbums] = useState<Album[]>([]);
@@ -250,16 +248,6 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, loadedIndex, trackIndex, currentTrack, spotifyReady]);
 
-  // Master volume fader: apply to whichever engine is currently sounding.
-  // Spotify's setVolume is a network call, so only fire it for that engine.
-  useEffect(() => {
-    const audio = audioRef.current;
-    if (audio) audio.volume = volume;
-    if (isSpotifyTrack) {
-      spotifyRef.current?.setVolume(volume).catch(() => {});
-    }
-  }, [volume, isSpotifyTrack, spotifyReady]);
-
   // The audio element reports progress via timeupdate; Spotify needs polling.
   // The end-of-track heuristic: Spotify parks paused at position 0 after the
   // last position we saw was near the end.
@@ -368,7 +356,17 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
           spotifyLastPosRef.current = 0;
         } else {
           const audio = audioRef.current;
-          if (audio) {
+          if (audio && track?.url) {
+            // Pre-load the src here, well before the needle drop, instead
+            // of at play() time — matching how the crackle clip (a static
+            // src from mount) always succeeds on iOS. Assigning .src and
+            // calling .play() in the same synchronous gesture is the usual
+            // advice, but on iOS Safari the .src change itself triggers an
+            // internal abort/reload that can cancel an immediately-following
+            // play() even though it's technically still gesture-synchronous.
+            // Giving the element a stable, already-loaded src ahead of time
+            // sidesteps that race entirely.
+            audio.src = track.url;
             audio.currentTime = 0;
             audio.muted = false;
           }
@@ -487,6 +485,13 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
   // The start/stop switch only spins the platter motor — it never drops the
   // needle. If the needle is already in a groove (motor stopped mid-track),
   // restarting the motor resumes from that spot.
+  //
+  // Turning the motor on is also the most reliably gesture-trusted moment
+  // available: it's a plain <button onClick>, unlike the tonearm's custom
+  // pointer-drag. So this is what actually unlocks audio for iOS — priming
+  // it here means the later needle-drop's play() call (in seekTrack) is
+  // just resuming an already-blessed element instead of risking its own,
+  // less-trusted gesture being the one iOS silently rejects.
   const toggleTable = () => {
     if (!loadedAlbum || busy) return;
     if (tableOn) {
@@ -494,6 +499,7 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
       if (status === "playing") pause();
     } else {
       setTableOn(true);
+      primeAudioForIOS();
       if (status === "paused") play();
     }
   };
@@ -556,7 +562,6 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
   // `status` and waiting for the effect to notice.
   const seekTrack = (index: number) => {
     if (!loadedAlbum || busy || !tableOn) return;
-    playCrackle();
     // Resolved directly from the index param, not the `currentTrack`
     // state var — that still reflects the *old* trackIndex until the
     // setTrackIndex below actually commits and re-renders.
@@ -571,6 +576,7 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
       setTrackIndex(index);
     }
     setProgress(0);
+    playCrackle();
     setStatus("playing");
     if (track.spotifyUri) {
       startOrResumeSpotify(track.spotifyUri);
@@ -756,13 +762,11 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
         elapsedSeconds={elapsedSeconds}
         platterRef={platterRef}
         tableOn={tableOn}
-        volume={volume}
         onPrimeAudio={primeAudioForIOS}
         onSeek={seekTrack}
         onResume={resumeAtCurrentPosition}
         onStop={stop}
         onToggleTable={toggleTable}
-        onVolumeChange={setVolume}
         onScrub={handleScrub}
         onScrubEnd={handleScrubEnd}
       />

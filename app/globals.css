@@ -208,8 +208,8 @@ a {
   display: flex;
   align-items: center;
   gap: 24px;
-  padding: 24px;
-  border-radius: 30px;
+  padding: 24px 24px 64px 24px;
+  border-radius: 20px;
   background: rgba(0, 0, 0, 0.6);
   backdrop-filter: blur(20px);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
@@ -217,17 +217,9 @@ a {
 
 .deck {
   position: relative;
-  /* Above .mixer-panel so the tonearm's sweep paints over the sliders
-     where their boxes overlap, instead of tucking behind them. */
+  /* Above .power-control so the tonearm's sweep paints over it where their
+     boxes overlap, instead of tucking behind it. */
   z-index: 2;
-}
-
-.mixer-panel {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 4px 2px;
 }
 
 .platter {
@@ -255,7 +247,13 @@ a {
   height: 8px;
   border-radius: 50%;
   transform: translate(-50%, -50%);
-  background: linear-gradient(180deg, #d8d8d8 0%, #9a9a9a 45%, #6e6e6e 55%, #b8b8b8 100%);
+  background: linear-gradient(
+    180deg,
+    #d8d8d8 0%,
+    #9a9a9a 45%,
+    #6e6e6e 55%,
+    #b8b8b8 100%
+  );
   /* outline (not border) so it doesn't grow the box — the 8px fill still
      lines up exactly with the record's masked-out hole */
   outline: 4px solid #000;
@@ -400,20 +398,28 @@ a {
   pointer-events: none;
 }
 
-.controls {
+.control-with-caption {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 18px;
-  justify-content: center;
+  gap: 6px;
 }
 
-.controls button {
+/* Bottom-right of the deck, sharing the tonearm's horizontal position
+   (right: -4px, same as .tonearm) so pivot and Power form one column
+   beside the disc. */
+.power-control {
+  position: absolute;
+  right: 10px;
+  bottom: -38px;
+}
+
+.control-with-caption button {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 46px;
-  height: 46px;
+  width: 25px;
+  height: 25px;
   border-radius: 50%;
   border: 2px solid rgba(255, 255, 255, 0.25);
   background: rgba(255, 255, 255, 0.05);
@@ -426,65 +432,72 @@ a {
 }
 
 /* Engaged buttons stay visibly "on" — a filled ring, not a shadow trick */
-.controls button:active:not(:disabled),
-.controls button[data-pressed="true"] {
+.control-with-caption button:active:not(:disabled),
+.control-with-caption button[data-pressed="true"] {
   background: rgba(255, 255, 255, 0.16);
   border-color: rgba(255, 255, 255, 0.45);
 }
 
-.controls button:disabled {
+.control-with-caption button:disabled {
   cursor: default;
 }
 
-.control-with-caption {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-}
-
 .control-caption {
-  font-size: 8px;
+  font-size: 7px;
   letter-spacing: 0.5px;
   color: rgba(255, 255, 255, 0.6);
   text-transform: uppercase;
 }
 
-/* --- Analog mixer knobs (Volume / Noise) --- */
+/* --- Chassis screws, one in each corner of the turntable housing --- */
 
-.mixer-knob {
-  position: relative;
-  width: 46px;
-  height: 46px;
+.turntable-screw {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  opacity: 0.2;
   border-radius: 50%;
-  border: 2px solid rgba(255, 255, 255, 0.25);
-  background: rgba(255, 255, 255, 0.05);
-  cursor: grab;
-  touch-action: none;
-  -webkit-tap-highlight-color: transparent;
-  transition: background 0.15s ease;
+  background: radial-gradient(
+    circle at 35% 30%,
+    #d8d8d8 0%,
+    #8a8a8a 45%,
+    #4a4a4a 100%
+  );
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.5),
+    0 1px 2px rgba(0, 0, 0, 0.5);
 }
 
-.mixer-knob[data-dragging] {
-  cursor: grabbing;
-  background: rgba(255, 255, 255, 0.16);
-}
-
-.mixer-knob-face {
+/* A slot cut across the head, like a flathead screw */
+.turntable-screw::after {
+  content: "";
   position: absolute;
-  inset: 0;
+  top: 50%;
+  left: 15%;
+  right: 15%;
+  height: 1px;
+  background: rgba(0, 0, 0, 0.55);
+  transform: translateY(-50%);
 }
 
-/* The pointer/indicator — sits near the rim and sweeps with .mixer-knob-face */
-.mixer-knob-indicator {
-  position: absolute;
-  top: 6px;
-  left: 50%;
-  width: 2px;
-  height: 11px;
-  border-radius: 1px;
-  background: rgba(255, 255, 255, 0.8);
-  transform: translateX(-50%);
+.turntable-screw-tl {
+  top: 10px;
+  left: 10px;
+}
+
+.turntable-screw-tr {
+  top: 10px;
+  right: 10px;
+}
+
+.turntable-screw-bl {
+  bottom: 10px;
+  left: 10px;
+}
+
+.turntable-screw-br {
+  bottom: 10px;
+  right: 10px;
 }
 
 .album-carousel {
