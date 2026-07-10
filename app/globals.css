@@ -123,11 +123,29 @@ a {
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 24px;
+  width: 100%;
+  height: 100%;
   padding: 32px 16px;
 }
 
+/* Guaranteed-clickable full-viewport hit zone: relying on .player's own
+   box actually covering the screen was fragile, so this catches every tap
+   that isn't otherwise claimed by the deck/carousel/connect button. No
+   onClick of its own — it's a plain child of .player, so a click here just
+   bubbles up to .player's onClick={toggleCarousel} like anything else would. */
+.background-tap-zone {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  background: transparent;
+}
+
 .spotify-connect {
+  position: relative;
+  /* Above .background-tap-zone so it stays clickable */
+  z-index: 5;
   padding: 10px 22px;
   border: none;
   border-radius: 999px;
@@ -184,6 +202,9 @@ a {
 }
 
 .turntable {
+  position: relative;
+  /* Above .background-tap-zone so its own clicks/drags aren't swallowed */
+  z-index: 5;
   display: flex;
   align-items: center;
   gap: 24px;
@@ -196,12 +217,17 @@ a {
 
 .deck {
   position: relative;
+  /* Above .mixer-panel so the tonearm's sweep paints over the sliders
+     where their boxes overlap, instead of tucking behind them. */
+  z-index: 2;
 }
 
-@media (max-width: 600px) {
-  .turntable {
-    flex-direction: column;
-  }
+.mixer-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 2px;
 }
 
 .platter {
@@ -238,12 +264,10 @@ a {
   will-change: transform;
 }
 
-.record[data-status="playing"] {
+/* The platter motor (start/stop button) drives the spin — playback
+   status doesn't; sound needs the needle dropped separately */
+.record[data-spinning="true"] {
   animation-play-state: running;
-}
-
-.record[data-status="stopped"] {
-  animation: none;
 }
 
 .record {
@@ -267,6 +291,36 @@ a {
   height: 45%;
   border-radius: 50%;
   object-fit: cover;
+}
+
+/* Tiny Casio-style LCD showing elapsed track time, top-left of the deck */
+.time-display {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  top: -5px;
+  left: -4px;
+  z-index: 3;
+  padding: 3px;
+  border-radius: 6px;
+  text-align: center;
+}
+
+.time-display-digits {
+  display: block;
+  min-width: 44px;
+
+  padding: 1px 6px 2px;
+  border-radius: 3px;
+  background: linear-gradient(180deg, #c6c2a6 0%, #b3af93 100%);
+  color: #29271f;
+  font-family: var(--font-bitcount-single), monospace;
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 1px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 /* Wide transparent hit area; the visible arm and knob are drawn inside.
@@ -321,9 +375,10 @@ a {
 
 .controls {
   display: flex;
-  gap: 16px;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
   justify-content: center;
-  margin-top: 20px;
 }
 
 .controls button {
@@ -333,45 +388,76 @@ a {
   width: 46px;
   height: 46px;
   border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, 0.5);
-  color: #3a3a3a;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.05);
+  color: #e5e5e5;
   cursor: pointer;
-  /* Frosted-glass chrome to match .turntable's glass panel: bright top
-     highlight over a translucent base, light enough to keep the dark
-     icon color legible against the blurred backdrop behind it */
-  background:
-    radial-gradient(
-      circle at 50% 28%,
-      rgba(255, 255, 255, 0.95) 0%,
-      rgba(255, 255, 255, 0.5) 42%
-    ),
-    rgba(255, 255, 255, 0.35);
-  backdrop-filter: blur(12px);
-  box-shadow:
-    inset 0 1px 1px rgba(255, 255, 255, 0.9),
-    inset 0 -2px 3px rgba(0, 0, 0, 0.15),
-    0 3px 6px rgba(0, 0, 0, 0.25);
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease;
   -webkit-tap-highlight-color: transparent;
 }
 
-/* Pressed-in chrome: engaged buttons stay latched down like a real deck */
+/* Engaged buttons stay visibly "on" — a filled ring, not a shadow trick */
 .controls button:active:not(:disabled),
 .controls button[data-pressed="true"] {
-  background:
-    radial-gradient(
-      circle at 50% 75%,
-      rgba(255, 255, 255, 0.5) 0%,
-      rgba(255, 255, 255, 0) 45%
-    ),
-    linear-gradient(180deg, #b5b5b5 0%, #cfcfcf 60%, #dedede 100%);
-  box-shadow:
-    inset 0 2px 4px rgba(0, 0, 0, 0.35),
-    0 1px 2px rgba(0, 0, 0, 0.25);
-  transform: translateY(1px);
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.45);
 }
 
 .controls button:disabled {
   cursor: default;
+}
+
+.control-with-caption {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.control-caption {
+  font-size: 8px;
+  letter-spacing: 0.5px;
+  color: rgba(255, 255, 255, 0.6);
+  text-transform: uppercase;
+}
+
+/* --- Analog mixer knobs (Volume / Noise) --- */
+
+.mixer-knob {
+  position: relative;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.05);
+  cursor: grab;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.15s ease;
+}
+
+.mixer-knob[data-dragging] {
+  cursor: grabbing;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.mixer-knob-face {
+  position: absolute;
+  inset: 0;
+}
+
+/* The pointer/indicator — sits near the rim and sweeps with .mixer-knob-face */
+.mixer-knob-indicator {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  width: 2px;
+  height: 11px;
+  border-radius: 1px;
+  background: rgba(255, 255, 255, 0.8);
+  transform: translateX(-50%);
 }
 
 .album-carousel {
@@ -482,17 +568,23 @@ a {
   flex-direction: column;
   align-items: center;
   gap: 2px;
+  background: rgba(0, 0, 0, 0.6);
+  padding: 10px 12px;
+  border-radius: 999px;
   text-align: center;
+  backdrop-filter: blur(10px);
+  color: #fff;
 }
 
 .album-title {
   display: block;
   font-weight: 600;
+  font-size: 12px;
 }
 
 .album-artist {
   display: block;
-  font-size: 13px;
+  font-size: 10px;
   opacity: 0.7;
 }
 

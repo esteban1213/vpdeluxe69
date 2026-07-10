@@ -131,6 +131,7 @@ export type SpotifyPlayer = {
   pause(): Promise<void>;
   resume(): Promise<void>;
   seek(positionMs: number): Promise<void>;
+  setVolume(volume: number): Promise<void>;
   getCurrentState(): Promise<SpotifyState | null>;
   activateElement?: () => Promise<void>;
 };

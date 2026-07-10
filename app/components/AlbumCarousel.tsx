@@ -43,6 +43,7 @@ export default function AlbumCarousel({
       className="album-carousel"
       data-visible={visible}
       onPointerDown={onActivity}
+      onClick={(e) => e.stopPropagation()}
     >
       <Swiper
         modules={[EffectCards]}

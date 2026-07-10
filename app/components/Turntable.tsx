@@ -1,21 +1,33 @@
 import { useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent, RefObject } from "react";
-import { Play, Pause, Square, Library } from "lucide-react";
 import type { Album, PlaybackStatus } from "./RecordPlayer";
 import { RECORD_TO_PLATTER_RATIO } from "./RecordPlayer";
+import TimeDisplay from "./TimeDisplay";
+import MixerKnob from "./MixerKnob";
 
 type Props = {
   album?: Album;
   status: PlaybackStatus;
   busy: boolean;
   albumProgress: number;
+  /** Seconds elapsed in the current track, shown on the deck's LCD */
+  elapsedSeconds: number;
   platterRef: RefObject<HTMLDivElement | null>;
-  carouselVisible: boolean;
+  /** Whether the platter motor is running (spins the record, no sound) */
+  tableOn: boolean;
+  /** Master playback volume, 0..1 */
+  volume: number;
+  /** Vinyl surface-noise loop volume, 0..1 */
+  noiseLevel: number;
+  /** Drop the needle onto a specific track's start groove */
   onSeek: (trackIndex: number) => void;
-  onPlay: () => void;
-  onPause: () => void;
+  /** Drop the needle onto the "Current Time" groove — resumes in place */
+  onResume: () => void;
+  /** Drop the needle onto the rest groove — halts playback */
   onStop: () => void;
-  onToggleCarousel: () => void;
+  onToggleTable: () => void;
+  onVolumeChange: (value: number) => void;
+  onNoiseChange: (value: number) => void;
   /** Nudge the current track's playback position by this many seconds */
   onScrub: (deltaSeconds: number) => void;
   /** Fires once a disc-scrub gesture ends, e.g. to flush a throttled seek */
@@ -29,9 +41,18 @@ type Geometry = {
   recordRadius: number;
 };
 
+type SnapPoint = {
+  kind: "track" | "current" | "rest";
+  index?: number;
+  angle: number;
+  label: string;
+};
+
 type Drag = {
-  snapIndex: number;
   tip: { x: number; y: number };
+  /** The snap point currently magnetically engaged, if the needle is close
+   *  enough to one — undefined while freely swinging between them. */
+  snap?: SnapPoint;
 };
 
 type DiscDrag = {
@@ -44,6 +65,13 @@ const GROOVE_OUTER = 0.93;
 const GROOVE_INNER = 0.5;
 // Matches the transform-origin y offset in the .tonearm CSS
 const PIVOT_Y = 8;
+// Matches .tonearm's CSS default `transform: rotate(-28deg)` — the parked
+// position off the record. Also doubles as the "Stop" snap point: dragging
+// the needle back here halts playback, like lifting it off the vinyl.
+const REST_ANGLE_DEG = -28;
+// Angular tolerance (deg) within which the needle magnetically locks onto
+// a snap point while dragging, instead of following the pointer exactly.
+const SNAP_THRESHOLD_DEG = 6;
 // Real 33⅓ RPM vinyl speed — matches .record's record-spin animation
 // duration (1.8s) in globals.css, so dragging the disc scrubs time 1:1
 // with how far a real record would have physically turned underneath it.
@@ -89,18 +117,85 @@ function angleForRadius(g: Geometry, r: number): number {
 const radiusForProgress = (g: Geometry, p: number) =>
   g.recordRadius * (GROOVE_OUTER - p * (GROOVE_OUTER - GROOVE_INNER));
 
+// Free-rotation angle (deg) that points the rigid arm directly at the
+// pointer, ignoring distance (the arm's length is fixed) — this is what
+// lets the needle track the pointer continuously instead of jumping
+// between discrete positions.
+function angleFromPivot(g: Geometry, px: number, py: number): number {
+  const dx = px - g.pivot.x;
+  const dy = py - g.pivot.y;
+  return Math.atan2(-dx, dy) * (180 / Math.PI);
+}
+
+// The arm's full physical sweep: from parked (off the record) across the
+// whole groove band to the innermost track. Order-agnostic so it doesn't
+// matter which extreme is numerically larger.
+function sweepBounds(g: Geometry): [number, number] {
+  const angles = [
+    REST_ANGLE_DEG,
+    angleForRadius(g, g.recordRadius * GROOVE_OUTER),
+    angleForRadius(g, g.recordRadius * GROOVE_INNER),
+  ];
+  return [Math.min(...angles), Math.max(...angles)];
+}
+
+// Every place the needle can meaningfully land: the start of each track,
+// the current playback position (so you can drop back into where you
+// left off), and the rest position (which stops the song).
+function buildSnapPoints(
+  g: Geometry,
+  album: Album,
+  albumProgress: number,
+): SnapPoint[] {
+  const count = album.tracks.length;
+  const points: SnapPoint[] = [];
+  for (let i = 0; i < count; i++) {
+    points.push({
+      kind: "track",
+      index: i,
+      angle: angleForRadius(g, radiusForProgress(g, i / count)),
+      label: album.tracks[i].title,
+    });
+  }
+  const p = Math.min(Math.max(albumProgress, 0), 1);
+  points.push({
+    kind: "current",
+    angle: angleForRadius(g, radiusForProgress(g, p)),
+    label: "Current Time",
+  });
+  points.push({ kind: "rest", angle: REST_ANGLE_DEG, label: "Stop" });
+  return points;
+}
+
+function nearestSnap(points: SnapPoint[], angle: number) {
+  let best = points[0];
+  let bestDelta = Math.abs(shortestAngleDelta(angle, points[0].angle));
+  for (let i = 1; i < points.length; i++) {
+    const delta = Math.abs(shortestAngleDelta(angle, points[i].angle));
+    if (delta < bestDelta) {
+      bestDelta = delta;
+      best = points[i];
+    }
+  }
+  return { point: best, delta: bestDelta };
+}
+
 export default function Turntable({
   album,
   status,
   busy,
   albumProgress,
+  elapsedSeconds,
   platterRef,
-  carouselVisible,
+  tableOn,
+  volume,
+  noiseLevel,
   onSeek,
-  onPlay,
-  onPause,
+  onResume,
   onStop,
-  onToggleCarousel,
+  onToggleTable,
+  onVolumeChange,
+  onNoiseChange,
   onScrub,
   onScrubEnd,
 }: Props) {
@@ -145,6 +240,9 @@ export default function Turntable({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [album, busy, status, albumProgress, drag]);
 
+  // The needle follows the pointer continuously across its full physical
+  // sweep — it only locks (magnetically) onto a snap point once close
+  // enough to one; otherwise it's free, so the user can swing it anywhere.
   const applyDrag = (clientX: number, clientY: number) => {
     const g = geometry();
     const deck = deckRef.current;
@@ -152,23 +250,17 @@ export default function Turntable({
     const rect = deck.getBoundingClientRect();
     const px = clientX - rect.left;
     const py = clientY - rect.top;
-    const outer = g.recordRadius * GROOVE_OUTER;
-    const inner = g.recordRadius * GROOVE_INNER;
-    const pointerRadius = Math.min(
-      outer,
-      Math.max(inner, Math.hypot(px - g.center.x, py - g.center.y)),
-    );
-    const rawProgress = (outer - pointerRadius) / (outer - inner);
-    const count = album.tracks.length;
-    const snapIndex = Math.min(
-      count - 1,
-      Math.max(0, Math.round(rawProgress * count)),
-    );
-    const angle = angleForRadius(g, radiusForProgress(g, snapIndex / count));
+    const freeAngle = angleFromPivot(g, px, py);
+    const [minAngle, maxAngle] = sweepBounds(g);
+    const clamped = Math.min(maxAngle, Math.max(minAngle, freeAngle));
+    const points = buildSnapPoints(g, album, albumProgress);
+    const { point, delta } = nearestSnap(points, clamped);
+    const engaged = delta <= SNAP_THRESHOLD_DEG;
+    const angle = engaged ? point.angle : clamped;
     const rad = (angle * Math.PI) / 180;
     setNeedleAngle(angle);
     setDrag({
-      snapIndex,
+      snap: engaged ? point : undefined,
       tip: {
         x: g.pivot.x - g.armLen * Math.sin(rad),
         y: g.pivot.y + g.armLen * Math.cos(rad),
@@ -177,7 +269,8 @@ export default function Turntable({
   };
 
   const handlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
-    if (!album || busy) return;
+    // The needle only comes off its rest while the platter is spinning
+    if (!album || busy || !tableOn) return;
     e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
     applyDrag(e.clientX, e.clientY);
@@ -188,10 +281,22 @@ export default function Turntable({
     applyDrag(e.clientX, e.clientY);
   };
 
+  // Only a snap actually engaged at release commits to anything; letting go
+  // in open air (no snap locked in) leaves nothing changed — the needle
+  // settles back to wherever it belongs (still playing, paused, or at rest)
+  // via the effect above once `drag` clears.
   const handlePointerUp = () => {
     if (!drag) return;
-    onSeek(drag.snapIndex);
+    const snap = drag.snap;
     setDrag(null);
+    if (!snap) return;
+    if (snap.kind === "track" && snap.index !== undefined) {
+      onSeek(snap.index);
+    } else if (snap.kind === "current") {
+      onResume();
+    } else if (snap.kind === "rest") {
+      onStop();
+    }
   };
 
   // Rotating the disc itself scrubs time within the *current* track only —
@@ -306,11 +411,19 @@ export default function Turntable({
   }, [album?.id]);
 
   return (
-    <div className="turntable">
+    // Tapping anywhere outside the player (the background) reveals the
+    // library — stop the click here so interacting with the deck itself
+    // never counts as "outside".
+    <div
+      className="turntable"
+      onClick={(e) => e.stopPropagation()}
+    >
       <div
         className="deck"
         ref={deckRef}
       >
+        <TimeDisplay seconds={elapsedSeconds} />
+
         <div
           className="platter"
           ref={platterRef}
@@ -319,7 +432,7 @@ export default function Turntable({
             <div
               ref={recordRef}
               className="record"
-              data-status={status}
+              data-spinning={tableOn ? "true" : "false"}
               style={{
                 cursor: busy ? "default" : discScrubbing ? "grabbing" : "grab",
               }}
@@ -349,14 +462,19 @@ export default function Turntable({
             ...(drag || discScrubbing
               ? { transition: "transform 0.15s ease" }
               : {}),
-            cursor: album && !busy ? (drag ? "grabbing" : "grab") : "default",
+            cursor:
+              album && !busy && tableOn
+                ? drag
+                  ? "grabbing"
+                  : "grab"
+                : "default",
           }}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
           onPointerCancel={() => setDrag(null)}
         />
-        {drag && album && (
+        {drag?.snap && (
           <div
             className="needle-tooltip"
             style={{
@@ -365,50 +483,32 @@ export default function Turntable({
               transform: "translate(-50%, -140%)",
             }}
           >
-            {album.tracks[drag.snapIndex].title}
+            {drag.snap.label}
           </div>
         )}
+      </div>
+      <div className="mixer-panel">
         <div className="controls">
-          <button
-            onClick={status === "playing" ? onPause : onPlay}
-            disabled={!album || busy}
-            data-pressed={status === "playing"}
-            aria-label={status === "playing" ? "Pause" : "Play"}
-          >
-            {status === "playing" ? (
-              <Pause
-                size={16}
-                fill="currentColor"
-                strokeWidth={0}
-              />
-            ) : (
-              <Play
-                size={16}
-                fill="currentColor"
-                strokeWidth={0}
-              />
-            )}
-          </button>
-          <button
-            onClick={onStop}
-            disabled={busy || status === "stopped"}
-            data-pressed={status === "stopped"}
-            aria-label="Stop"
-          >
-            <Square
-              size={14}
-              fill="currentColor"
-              strokeWidth={0}
+          <MixerKnob
+            label="Volume"
+            value={volume}
+            onChange={onVolumeChange}
+          />
+          <MixerKnob
+            label="Noise"
+            value={noiseLevel}
+            onChange={onNoiseChange}
+          />
+          <div className="control-with-caption">
+            <button
+              onClick={onToggleTable}
+              disabled={!album || busy}
+              data-pressed={tableOn}
+              aria-pressed={tableOn}
+              aria-label={tableOn ? "Stop turntable" : "Start turntable"}
             />
-          </button>
-          <button
-            onClick={onToggleCarousel}
-            disabled={busy}
-            data-pressed={carouselVisible}
-            aria-label={carouselVisible ? "Hide records" : "Show records"}
-          >
-            <Library size={16} />
-          </button>
+            <span className="control-caption">Start</span>
+          </div>
         </div>
       </div>
     </div>

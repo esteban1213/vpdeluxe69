@@ -5,7 +5,6 @@ import type { Swiper as SwiperClass } from "swiper/types";
 import Turntable from "./Turntable";
 import AlbumCarousel from "./AlbumCarousel";
 import SiteBackground from "./SiteBackground";
-import TrackProgress from "./TrackProgress";
 import {
   beginSpotifyLogin,
   clearSpotifyToken,
@@ -52,9 +51,7 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
   const crackleFadeTimerRef = useRef<ReturnType<typeof setInterval> | null>(
     null,
   );
-  const crackleDropTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
+  const noiseRef = useRef<HTMLAudioElement>(null);
   const platterRef = useRef<HTMLDivElement>(null);
   const flyRef = useRef<HTMLDivElement>(null);
   const flySleeveRef = useRef<HTMLImageElement>(null);
@@ -74,8 +71,15 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
   const [pendingIndex, setPendingIndex] = useState<number | null>(null);
   const [flight, setFlight] = useState<Flight | null>(null);
   const [status, setStatus] = useState<PlaybackStatus>("stopped");
+  const [tableOn, setTableOn] = useState(false);
   const [trackIndex, setTrackIndex] = useState(0);
   const [progress, setProgress] = useState(0);
+  // Mixer faders: master playback volume, and the vinyl surface-noise loop
+  // that plays continuously (mixed under the music) whenever a track is
+  // actually sounding — a separate, softer effect from the one-shot needle
+  // "contact" crackle played by playCrackle() above.
+  const [volume, setVolume] = useState(1);
+  const [noiseLevel, setNoiseLevel] = useState(0.5);
   const [spotifyAuthed, setSpotifyAuthed] = useState(false);
   const [spotifyReady, setSpotifyReady] = useState(false);
   const [spotifyAlbums, setSpotifyAlbums] = useState<Album[]>([]);
@@ -101,6 +105,12 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
   // mid-flight toward/away from it, or — if nothing's loaded yet — just
   // front-and-center in the carousel.
   const backgroundAlbum = loadedAlbum ?? flightAlbum ?? browsingAlbum;
+  // Seconds into the current track, for the deck's LCD. Progress is a
+  // fraction, so scale by whichever engine's duration applies.
+  const trackDurationSec = isSpotifyTrack
+    ? spotifyDurationRef.current / 1000
+    : audioRef.current?.duration || 0;
+  const elapsedSeconds = progress * trackDurationSec;
 
   // How long the album carousel stays up with no interaction before it
   // auto-hides so the (now fixed-position) turntable can stand alone.
@@ -247,6 +257,33 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, loadedIndex, trackIndex, currentTrack, spotifyReady]);
 
+  // Master volume fader: apply to whichever engine is currently sounding.
+  // Spotify's setVolume is a network call, so only fire it for that engine.
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (audio) audio.volume = volume;
+    if (isSpotifyTrack) {
+      spotifyRef.current?.setVolume(volume).catch(() => {});
+    }
+  }, [volume, isSpotifyTrack, spotifyReady]);
+
+  // Vinyl surface-noise loop: plays continuously, mixed under the music,
+  // for as long as something is actually sounding — silent the instant
+  // playback pauses/stops or a disc is mid-flight. Separate from the
+  // one-shot needle-drop crackle above (playCrackle), which is a brief
+  // contact pop rather than a sustained bed of noise.
+  useEffect(() => {
+    const noise = noiseRef.current;
+    if (!noise) return;
+    noise.volume = noiseLevel;
+    if (status === "playing" && !busy) {
+      noise.loop = true;
+      noise.play().catch(() => {});
+    } else {
+      noise.pause();
+    }
+  }, [status, busy, noiseLevel]);
+
   // The audio element reports progress via timeupdate; Spotify needs polling.
   // The end-of-track heuristic: Spotify parks paused at position 0 after the
   // last position we saw was near the end.
@@ -276,43 +313,16 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, isSpotifyTrack, loadedIndex, trackIndex]);
 
-  // iOS only allows audio to start inside a user gesture. The real play()
-  // happens after the flight animation, so start the track muted during the
-  // tap and let it run — the landing rewinds and unmutes it.
-  const unlockPlayback = (track?: Track) => {
-    if (!track) return;
-    if (track.spotifyUri) {
-      // Spotify playback starts via REST; just poke the SDK's media element
-      spotifyRef.current?.activateElement?.();
-    } else if (track.url) {
-      const audio = audioRef.current;
-      if (!audio) return;
-      if (audio.src !== track.url) {
-        audio.src = track.url;
-      }
-      audio.muted = true;
-      audio.play().catch(() => {
-        audio.muted = false;
-      });
-    }
-  };
-
   // Vinyl needle-drop crackle, played briefly from a random point in the
-  // (28s) source clip once the disc has actually landed on the platter
-  // *and* the tonearm has finished swinging onto the groove — not the
-  // instant a new record is picked (see NEEDLE_DROP_MS below, scheduled
-  // from the flight effect's landing branch). Randomizing the start point
-  // keeps it from sounding identical every time. Kept short and quiet —
-  // it's meant as a subtle texture, not something that competes with the
-  // track itself.
+  // (28s) source clip the moment the user drops the needle into a groove.
+  // Randomizing the start point keeps it from sounding identical every
+  // time. Kept short and quiet — it's meant as a subtle texture, not
+  // something that competes with the track itself.
   const CRACKLE_FALLBACK_DURATION = 28;
   const CRACKLE_SNIPPET_MIN = 0.6;
   const CRACKLE_SNIPPET_MAX = 1.2;
   const CRACKLE_VOLUME = 0.28;
   const CRACKLE_FADE_MS = 220;
-  // Matches .tonearm's `transition: transform 0.6s ease` in globals.css —
-  // how long the needle takes to settle onto the record once it lands.
-  const NEEDLE_DROP_MS = 600;
 
   const clearCrackleTimers = () => {
     if (crackleStopTimerRef.current) {
@@ -322,10 +332,6 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
     if (crackleFadeTimerRef.current) {
       clearInterval(crackleFadeTimerRef.current);
       crackleFadeTimerRef.current = null;
-    }
-    if (crackleDropTimerRef.current) {
-      clearTimeout(crackleDropTimerRef.current);
-      crackleDropTimerRef.current = null;
     }
   };
 
@@ -408,7 +414,8 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
           setTouchMove(true);
         }
       } else {
-        // Restart the record from the beginning, audible
+        // A fresh disc on a silent deck: motor off, needle at rest. The
+        // user has to hit start and drop the needle themselves.
         const track = albums[flight.index].tracks[0];
         if (track?.spotifyUri) {
           // Force a fresh start instead of resuming an earlier session
@@ -425,16 +432,12 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
         setProgress(0);
         setLoadedIndex(flight.index);
         setFlight(null);
-        setStatus("playing");
+        setStatus("stopped");
+        setTableOn(false);
         setTouchMove(true);
-        // The disc has landed and is playing — the crate can get out of
-        // the way now that the animation is fully done.
+        // The disc has landed — the crate can get out of the way now that
+        // the animation is fully done.
         dismissCarousel();
-        // The disc is down and the tonearm has just started swinging onto
-        // it — wait for that needle-drop transition to actually finish
-        // before playing the crackle, so it lines up with the needle
-        // touching vinyl instead of firing while it's still mid-swing.
-        crackleDropTimerRef.current = setTimeout(playCrackle, NEEDLE_DROP_MS);
       }
     };
 
@@ -535,6 +538,20 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
     setStatus("paused");
   };
 
+  // The start/stop switch only spins the platter motor — it never drops the
+  // needle. If the needle is already in a groove (motor stopped mid-track),
+  // restarting the motor resumes from that spot.
+  const toggleTable = () => {
+    if (!loadedAlbum || busy) return;
+    if (tableOn) {
+      setTableOn(false);
+      if (status === "playing") pause();
+    } else {
+      setTableOn(true);
+      if (status === "paused") play();
+    }
+  };
+
   // Silence both engines: also used when switching albums mid-play
   const stop = () => {
     const audio = audioRef.current;
@@ -552,8 +569,11 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
     setProgress(0);
   };
 
+  // Dropping the needle into a groove — the only way sound ever starts.
+  // Requires the motor to be running; the crackle marks the contact.
   const seekTrack = (index: number) => {
-    if (!loadedAlbum || busy) return;
+    if (!loadedAlbum || busy || !tableOn) return;
+    playCrackle();
     if (index === trackIndex) {
       if (isSpotifyTrack) {
         spotifyRef.current?.seek(0);
@@ -564,6 +584,15 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
       setTrackIndex(index);
     }
     setProgress(0);
+    play();
+  };
+
+  // Dropping the needle onto the "Current Time" groove: resumes exactly
+  // where playback left off, without touching the track or its position —
+  // unlike seekTrack, which always jumps to a track's start.
+  const resumeAtCurrentPosition = () => {
+    if (!loadedAlbum || busy || !tableOn) return;
+    playCrackle();
     play();
   };
 
@@ -631,10 +660,17 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
 
   const handleEnded = () => {
     if (loadedAlbum && trackIndex < loadedAlbum.tracks.length - 1) {
+      // More tracks left on the record — the engine-driving effect above
+      // picks up the new trackIndex and starts it, since status stays
+      // "playing" throughout.
       setTrackIndex(trackIndex + 1);
       setProgress(0);
     } else {
+      // End of the album: power down the motor too (not just playback) —
+      // status flipping to "stopped" already sends the needle back to its
+      // rest position via Turntable's needle-angle effect.
       setStatus("stopped");
+      setTableOn(false);
       setTrackIndex(0);
       setProgress(0);
     }
@@ -643,6 +679,7 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
   const signOutSpotify = () => {
     if (busy) return;
     stop();
+    setTableOn(false);
     clearSpotifyToken();
     setSpotifyAlbums([]);
     setSpotifyAuthed(false);
@@ -658,11 +695,7 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
     // activity, so a mid-browse carousel doesn't vanish out from under you
     handleCarouselActivity();
     if (index === loadedIndex) {
-      if (status === "playing") {
-        pause();
-      } else {
-        play();
-      }
+      toggleTable();
       return;
     }
     // Spotify albums need a login before anything can play
@@ -671,13 +704,11 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
       return;
     }
     // Cancel anything left over from a previous pick — a pending or still
-    // fading crackle, or one queued to fire once its needle drop finished —
-    // so a fast string of selections can't stack or leave a stray one
-    // playing for the wrong record. The new crackle gets scheduled once
-    // *this* disc actually lands (see the flight effect's finish()).
+    // fading crackle — so a fast string of selections can't stack or leave
+    // a stray one playing for the wrong record.
     clearCrackleTimers();
     stop();
-    unlockPlayback(albums[index].tracks[0]);
+    setTableOn(false);
     setTouchMove(false);
     if (loadedIndex !== null) {
       const returnIndex = loadedIndex;
@@ -698,32 +729,40 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
   );
 
   return (
-    <div className="player">
+    // Tapping the background (anywhere the deck, carousel, and connect
+    // button don't themselves capture) reveals the library.
+    <div
+      className="player"
+      onClick={toggleCarousel}
+    >
       <SiteBackground cover={backgroundAlbum?.cover} />
-      <TrackProgress
-        progress={progress}
-        visible={!!loadedAlbum && status !== "stopped"}
-      />
-
+      <div className="background-tap-zone" />
       <Turntable
         album={loadedAlbum}
         status={status}
         busy={busy}
         albumProgress={albumProgress}
+        elapsedSeconds={elapsedSeconds}
         platterRef={platterRef}
-        carouselVisible={carouselVisible}
+        tableOn={tableOn}
+        volume={volume}
+        noiseLevel={noiseLevel}
         onSeek={seekTrack}
-        onPlay={play}
-        onPause={pause}
+        onResume={resumeAtCurrentPosition}
         onStop={stop}
-        onToggleCarousel={toggleCarousel}
+        onToggleTable={toggleTable}
+        onVolumeChange={setVolume}
+        onNoiseChange={setNoiseLevel}
         onScrub={handleScrub}
         onScrubEnd={handleScrubEnd}
       />
       {spotifyAuthed ? null : (
         <button
           className="spotify-connect"
-          onClick={() => beginSpotifyLogin()}
+          onClick={(e) => {
+            e.stopPropagation();
+            beginSpotifyLogin();
+          }}
         >
           Connect Spotify
         </button>
@@ -772,6 +811,12 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
         ref={crackleRef}
         src="/audio/crackle.mp3"
         preload="auto"
+      />
+      <audio
+        ref={noiseRef}
+        src="/audio/crackle.mp3"
+        preload="auto"
+        loop
       />
     </div>
   );
