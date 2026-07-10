@@ -45,9 +45,6 @@ type Props = {
 export default function RecordPlayer({ albums: baseAlbums }: Props) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const crackleRef = useRef<HTMLAudioElement>(null);
-  const crackleStopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
   const platterRef = useRef<HTMLDivElement>(null);
   const flyRef = useRef<HTMLDivElement>(null);
   const flySleeveRef = useRef<HTMLImageElement>(null);
@@ -222,6 +219,7 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
       await playSpotifyTrack(device, uri);
       spotifyStartedUriRef.current = uri;
     } catch {
+      stopCrackle();
       setStatus("stopped");
     }
   };
@@ -243,7 +241,10 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
       }
       if (status === "playing") {
         audio.muted = false;
-        audio.play().catch(() => setStatus("stopped"));
+        audio.play().catch(() => {
+          stopCrackle();
+          setStatus("stopped");
+        });
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -288,40 +289,33 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, isSpotifyTrack, loadedIndex, trackIndex]);
 
-  // Vinyl needle crackle: plays for a fixed few seconds from a random point
-  // in the (28s) source clip each time a song starts (needle drop, resume,
-  // or auto-advance to the next track), then stops outright — a simple
-  // "the needle just touched down" texture, not a sustained ambience.
-  const CRACKLE_FALLBACK_DURATION = 28;
-  const CRACKLE_DURATION = 3;
+  // Vinyl needle crackle: plays the (now short) clip through to its natural
+  // end each time a song starts (needle drop, resume, or auto-advance to
+  // the next track). Calling this again mid-playback just restarts it from
+  // the top, so a rapid string of song starts can't stack overlapping copies.
   const CRACKLE_VOLUME = 0.28;
-
-  const clearCrackleTimer = () => {
-    if (crackleStopTimerRef.current) {
-      clearTimeout(crackleStopTimerRef.current);
-      crackleStopTimerRef.current = null;
-    }
-  };
 
   const playCrackle = () => {
     const audio = crackleRef.current;
     if (!audio) return;
-    // A rapid string of song starts shouldn't stack overlapping crackles
-    clearCrackleTimer();
-    const total =
-      Number.isFinite(audio.duration) && audio.duration > 0
-        ? audio.duration
-        : CRACKLE_FALLBACK_DURATION;
-    const maxStart = Math.max(0, total - CRACKLE_DURATION);
-    audio.currentTime = Math.random() * maxStart;
+    // Pause before seeking: setting currentTime alone is an async seek, and
+    // calling play() right after (without pausing first) can let the
+    // element briefly keep sounding from its old position on some desktop
+    // browsers, producing an audible stutter/double-hit at restart.
+    audio.pause();
+    audio.currentTime = 0;
     audio.volume = CRACKLE_VOLUME;
     audio.play().catch(() => {});
-    crackleStopTimerRef.current = setTimeout(() => {
-      audio.pause();
-    }, CRACKLE_DURATION * 1000);
   };
 
-  useEffect(() => clearCrackleTimer, []);
+  // Cuts the crackle off immediately — called from pause()/stop() so it
+  // never keeps playing once the record itself isn't.
+  const stopCrackle = () => {
+    const audio = crackleRef.current;
+    if (!audio) return;
+    audio.pause();
+    audio.currentTime = 0;
+  };
 
   const slideTo = (index: number) =>
     new Promise<void>((resolve) => {
@@ -486,6 +480,7 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
     } else {
       audioRef.current?.pause();
     }
+    stopCrackle();
     setStatus("paused");
   };
 
@@ -515,6 +510,7 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
       player.pause();
       player.seek(0);
     }
+    stopCrackle();
     setStatus("stopped");
     setTrackIndex(0);
     setProgress(0);
@@ -583,7 +579,10 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
       if (audio) {
         if (audio.src !== track.url) audio.src = track.url;
         audio.muted = false;
-        audio.play().catch(() => setStatus("stopped"));
+        audio.play().catch(() => {
+          stopCrackle();
+          setStatus("stopped");
+        });
       }
     }
   };
@@ -602,7 +601,10 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
       const audio = audioRef.current;
       if (audio) {
         audio.muted = false;
-        audio.play().catch(() => setStatus("stopped"));
+        audio.play().catch(() => {
+          stopCrackle();
+          setStatus("stopped");
+        });
       }
     }
   };
@@ -681,6 +683,7 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
       // End of the album: power down the motor too (not just playback) —
       // status flipping to "stopped" already sends the needle back to its
       // rest position via Turntable's needle-angle effect.
+      stopCrackle();
       setStatus("stopped");
       setTableOn(false);
       setTrackIndex(0);
@@ -715,10 +718,6 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
       beginSpotifyLogin();
       return;
     }
-    // Cancel anything left over from a previous pick — a still-playing
-    // crackle — so a fast string of selections can't stack or leave a
-    // stray one playing for the wrong record.
-    clearCrackleTimer();
     stop();
     setTableOn(false);
     setTouchMove(false);
