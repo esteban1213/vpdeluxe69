@@ -571,11 +571,23 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
 
   // Dropping the needle into a groove — the only way sound ever starts.
   // Requires the motor to be running; the crackle marks the contact.
+  //
+  // iOS Safari only allows audio.play() to succeed when it's called
+  // synchronously inside a user-gesture handler (the tonearm's pointerup,
+  // which is what calls this). The status-driven effect above starts
+  // playback too, but only after a setState + re-render — one tick too
+  // late for iOS's autoplay policy, which silently blocks it. So this
+  // starts the right engine directly, right here, instead of only flipping
+  // `status` and waiting for the effect to notice.
   const seekTrack = (index: number) => {
     if (!loadedAlbum || busy || !tableOn) return;
     playCrackle();
+    // Resolved directly from the index param, not the `currentTrack`
+    // state var — that still reflects the *old* trackIndex until the
+    // setTrackIndex below actually commits and re-renders.
+    const track = loadedAlbum.tracks[index];
     if (index === trackIndex) {
-      if (isSpotifyTrack) {
+      if (track.spotifyUri) {
         spotifyRef.current?.seek(0);
       } else if (audioRef.current) {
         audioRef.current.currentTime = 0;
@@ -584,16 +596,36 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
       setTrackIndex(index);
     }
     setProgress(0);
-    play();
+    setStatus("playing");
+    if (track.spotifyUri) {
+      startOrResumeSpotify(track.spotifyUri);
+    } else if (track.url) {
+      const audio = audioRef.current;
+      if (audio) {
+        if (audio.src !== track.url) audio.src = track.url;
+        audio.muted = false;
+        audio.play().catch(() => setStatus("stopped"));
+      }
+    }
   };
 
   // Dropping the needle onto the "Current Time" groove: resumes exactly
   // where playback left off, without touching the track or its position —
-  // unlike seekTrack, which always jumps to a track's start.
+  // unlike seekTrack, which always jumps to a track's start. Same
+  // synchronous-play requirement as seekTrack above.
   const resumeAtCurrentPosition = () => {
     if (!loadedAlbum || busy || !tableOn) return;
     playCrackle();
-    play();
+    setStatus("playing");
+    if (currentTrack?.spotifyUri) {
+      startOrResumeSpotify(currentTrack.spotifyUri);
+    } else if (currentTrack?.url) {
+      const audio = audioRef.current;
+      if (audio) {
+        audio.muted = false;
+        audio.play().catch(() => setStatus("stopped"));
+      }
+    }
   };
 
   // Spotify's seek() is a network call to Connect infrastructure, so it's

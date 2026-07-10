@@ -53,33 +53,26 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} ${bitcountSingle.variable}`}
     >
       <body>
-        {/* Temporary mobile debugging: surfaces JS errors on-page since we
-            can't see the phone's console. Catches bundle-load failures too. */}
+        {/* Catches JS errors that would otherwise fail silently (bundle
+            load failures, thrown errors, unhandled rejections) and logs
+            them to the console — no visible UI, so a stray/benign error
+            (e.g. iOS's share sheet) can't make the app look broken. */}
         <script
           dangerouslySetInnerHTML={{
             __html: `(function(){
-  var box = null;
-  function ensure(){
-    if (!box) {
-      box = document.createElement('div');
-      box.style.cssText = 'position:fixed;bottom:0;left:0;right:0;z-index:9999;background:#7f1d1d;color:#fff;font:11px/1.4 monospace;padding:8px;max-height:40vh;overflow:auto;white-space:pre-wrap;';
-      document.body.appendChild(box);
-    }
-    return box;
-  }
-  function log(m){ try { ensure().textContent += m + '\\n\\n'; } catch(e) {} }
+  function log(){ try { console.error.apply(console, arguments); } catch(e) {} }
   window.addEventListener('error', function(e){
     var t = e.target;
     if (t && t !== window && (t.src || t.href)) {
-      log('ASSET FAILED: ' + (t.src || t.href));
+      log('ASSET FAILED:', t.src || t.href);
       return;
     }
-    log('ERROR: ' + (e.message || '') + ' @ ' + (e.filename || '') + ':' + (e.lineno || ''));
-    if (e.error && e.error.stack) log(e.error.stack.slice(0, 600));
+    log('ERROR:', e.message, '@', (e.filename || '') + ':' + (e.lineno || ''));
+    if (e.error && e.error.stack) log(e.error.stack);
   }, true);
   window.addEventListener('unhandledrejection', function(e){
     var r = e.reason;
-    log('REJECTION: ' + ((r && (r.stack || r.message)) || String(r)).slice(0, 600));
+    log('REJECTION:', (r && (r.stack || r.message)) || String(r));
   });
 })();`,
           }}

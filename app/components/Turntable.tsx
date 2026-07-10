@@ -428,6 +428,10 @@ export default function Turntable({
           className="platter"
           ref={platterRef}
         >
+          {/* Always present, not just when empty — the record's center hole
+              is a real cutout (mask-image on .record), so this shows
+              through it once a disc is loaded, exactly like a real spindle. */}
+          <span className="platter-spindle" />
           {album ? (
             <div
               ref={recordRef}

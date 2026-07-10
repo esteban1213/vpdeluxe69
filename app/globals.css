@@ -231,6 +231,7 @@ a {
 }
 
 .platter {
+  position: relative;
   width: 240px;
   height: 240px;
   border-radius: 50%;
@@ -240,9 +241,38 @@ a {
   justify-content: center;
 }
 
+/* The bare spindle peg a record drops onto — shown only while the platter
+   is empty, so it reads as a real turntable waiting for a disc rather than
+   a flat dark circle. Dead center, matching where a loaded record's own
+   center hole (.record::after) and the needle's geometry both reference. */
+.platter-spindle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  /* 8px diameter — matches the record's masked-out center hole exactly,
+     so this shows through it precisely once a disc is loaded */
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: linear-gradient(180deg, #d8d8d8 0%, #9a9a9a 45%, #6e6e6e 55%, #b8b8b8 100%);
+  /* outline (not border) so it doesn't grow the box — the 8px fill still
+     lines up exactly with the record's masked-out hole */
+  outline: 4px solid #000;
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.6),
+    inset 0 -1px 2px rgba(0, 0, 0, 0.5),
+    0 1px 3px rgba(0, 0, 0, 0.6);
+}
+
 .platter-hint {
+  position: absolute;
+  top: 64%;
+  left: 50%;
+  transform: translate(-50%, -50%);
   color: #6f6f6f;
   font-size: 13px;
+  white-space: nowrap;
 }
 
 .record {
@@ -272,18 +302,15 @@ a {
 
 .record {
   position: relative;
-}
-
-.record::after {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #141414;
-  transform: translate(-50%, -50%);
+  /* A real cutout, not a painted-on dot — punches straight through the
+     grooves and label to reveal .platter-spindle underneath, matching its
+     size exactly (4px radius = 8px diameter, same as the spindle). */
+  -webkit-mask-image: radial-gradient(
+    circle at center,
+    transparent 4px,
+    #000 4px
+  );
+  mask-image: radial-gradient(circle at center, transparent 4px, #000 4px);
 }
 
 .record-label {
