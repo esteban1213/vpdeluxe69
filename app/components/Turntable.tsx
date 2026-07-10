@@ -17,8 +17,10 @@ type Props = {
   tableOn: boolean;
   /** Master playback volume, 0..1 */
   volume: number;
-  /** Vinyl surface-noise loop volume, 0..1 */
-  noiseLevel: number;
+  /** Fired the instant the needle is grabbed — primes the audio element
+   *  for iOS, which needs playback "unlocked" by a direct gesture before
+   *  any later programmatic play() call is allowed to succeed */
+  onPrimeAudio: () => void;
   /** Drop the needle onto a specific track's start groove */
   onSeek: (trackIndex: number) => void;
   /** Drop the needle onto the "Current Time" groove — resumes in place */
@@ -27,7 +29,6 @@ type Props = {
   onStop: () => void;
   onToggleTable: () => void;
   onVolumeChange: (value: number) => void;
-  onNoiseChange: (value: number) => void;
   /** Nudge the current track's playback position by this many seconds */
   onScrub: (deltaSeconds: number) => void;
   /** Fires once a disc-scrub gesture ends, e.g. to flush a throttled seek */
@@ -189,13 +190,12 @@ export default function Turntable({
   platterRef,
   tableOn,
   volume,
-  noiseLevel,
+  onPrimeAudio,
   onSeek,
   onResume,
   onStop,
   onToggleTable,
   onVolumeChange,
-  onNoiseChange,
   onScrub,
   onScrubEnd,
 }: Props) {
@@ -273,6 +273,9 @@ export default function Turntable({
     if (!album || busy || !tableOn) return;
     e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
+    // Prime audio right at the moment of contact — the earliest, most
+    // gesture-trusted point of this interaction (see the Props comment).
+    onPrimeAudio();
     applyDrag(e.clientX, e.clientY);
   };
 
@@ -497,11 +500,6 @@ export default function Turntable({
             label="Volume"
             value={volume}
             onChange={onVolumeChange}
-          />
-          <MixerKnob
-            label="Noise"
-            value={noiseLevel}
-            onChange={onNoiseChange}
           />
           <div className="control-with-caption">
             <button

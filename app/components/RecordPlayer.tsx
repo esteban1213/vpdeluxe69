@@ -48,10 +48,6 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
   const crackleStopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
-  const crackleFadeTimerRef = useRef<ReturnType<typeof setInterval> | null>(
-    null,
-  );
-  const noiseRef = useRef<HTMLAudioElement>(null);
   const platterRef = useRef<HTMLDivElement>(null);
   const flyRef = useRef<HTMLDivElement>(null);
   const flySleeveRef = useRef<HTMLImageElement>(null);
@@ -74,12 +70,8 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
   const [tableOn, setTableOn] = useState(false);
   const [trackIndex, setTrackIndex] = useState(0);
   const [progress, setProgress] = useState(0);
-  // Mixer faders: master playback volume, and the vinyl surface-noise loop
-  // that plays continuously (mixed under the music) whenever a track is
-  // actually sounding — a separate, softer effect from the one-shot needle
-  // "contact" crackle played by playCrackle() above.
+  // Master playback volume fader.
   const [volume, setVolume] = useState(1);
-  const [noiseLevel, setNoiseLevel] = useState(0.5);
   const [spotifyAuthed, setSpotifyAuthed] = useState(false);
   const [spotifyReady, setSpotifyReady] = useState(false);
   const [spotifyAlbums, setSpotifyAlbums] = useState<Album[]>([]);
@@ -267,23 +259,6 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
     }
   }, [volume, isSpotifyTrack, spotifyReady]);
 
-  // Vinyl surface-noise loop: plays continuously, mixed under the music,
-  // for as long as something is actually sounding — silent the instant
-  // playback pauses/stops or a disc is mid-flight. Separate from the
-  // one-shot needle-drop crackle above (playCrackle), which is a brief
-  // contact pop rather than a sustained bed of noise.
-  useEffect(() => {
-    const noise = noiseRef.current;
-    if (!noise) return;
-    noise.volume = noiseLevel;
-    if (status === "playing" && !busy) {
-      noise.loop = true;
-      noise.play().catch(() => {});
-    } else {
-      noise.pause();
-    }
-  }, [status, busy, noiseLevel]);
-
   // The audio element reports progress via timeupdate; Spotify needs polling.
   // The end-of-track heuristic: Spotify parks paused at position 0 after the
   // last position we saw was near the end.
@@ -313,64 +288,40 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, isSpotifyTrack, loadedIndex, trackIndex]);
 
-  // Vinyl needle-drop crackle, played briefly from a random point in the
-  // (28s) source clip the moment the user drops the needle into a groove.
-  // Randomizing the start point keeps it from sounding identical every
-  // time. Kept short and quiet — it's meant as a subtle texture, not
-  // something that competes with the track itself.
+  // Vinyl needle crackle: plays for a fixed few seconds from a random point
+  // in the (28s) source clip each time a song starts (needle drop, resume,
+  // or auto-advance to the next track), then stops outright — a simple
+  // "the needle just touched down" texture, not a sustained ambience.
   const CRACKLE_FALLBACK_DURATION = 28;
-  const CRACKLE_SNIPPET_MIN = 0.6;
-  const CRACKLE_SNIPPET_MAX = 1.2;
+  const CRACKLE_DURATION = 3;
   const CRACKLE_VOLUME = 0.28;
-  const CRACKLE_FADE_MS = 220;
 
-  const clearCrackleTimers = () => {
+  const clearCrackleTimer = () => {
     if (crackleStopTimerRef.current) {
       clearTimeout(crackleStopTimerRef.current);
       crackleStopTimerRef.current = null;
     }
-    if (crackleFadeTimerRef.current) {
-      clearInterval(crackleFadeTimerRef.current);
-      crackleFadeTimerRef.current = null;
-    }
-  };
-
-  const fadeOutCrackle = () => {
-    const audio = crackleRef.current;
-    if (!audio) return;
-    const steps = 8;
-    let step = 0;
-    const startVolume = audio.volume;
-    crackleFadeTimerRef.current = setInterval(() => {
-      step += 1;
-      audio.volume = Math.max(0, startVolume * (1 - step / steps));
-      if (step >= steps) {
-        clearCrackleTimers();
-        audio.pause();
-      }
-    }, CRACKLE_FADE_MS / steps);
   };
 
   const playCrackle = () => {
     const audio = crackleRef.current;
     if (!audio) return;
-    // A rapid string of record picks shouldn't stack overlapping crackles
-    clearCrackleTimers();
+    // A rapid string of song starts shouldn't stack overlapping crackles
+    clearCrackleTimer();
     const total =
       Number.isFinite(audio.duration) && audio.duration > 0
         ? audio.duration
         : CRACKLE_FALLBACK_DURATION;
-    const snippet =
-      CRACKLE_SNIPPET_MIN +
-      Math.random() * (CRACKLE_SNIPPET_MAX - CRACKLE_SNIPPET_MIN);
-    const maxStart = Math.max(0, total - snippet);
+    const maxStart = Math.max(0, total - CRACKLE_DURATION);
     audio.currentTime = Math.random() * maxStart;
     audio.volume = CRACKLE_VOLUME;
     audio.play().catch(() => {});
-    crackleStopTimerRef.current = setTimeout(fadeOutCrackle, snippet * 1000);
+    crackleStopTimerRef.current = setTimeout(() => {
+      audio.pause();
+    }, CRACKLE_DURATION * 1000);
   };
 
-  useEffect(() => clearCrackleTimers, []);
+  useEffect(() => clearCrackleTimer, []);
 
   const slideTo = (index: number) =>
     new Promise<void>((resolve) => {
@@ -569,6 +520,34 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
     setProgress(0);
   };
 
+  // iOS requires a media element to be "unlocked" by a successful play()
+  // inside a direct user gesture at least once before any later
+  // programmatic play() on it is allowed to succeed. The needle-drop
+  // release already calls play() synchronously (see seekTrack below), but
+  // some WebKit versions don't trust the pointerup that *ends* a drag as
+  // strongly as the pointerdown that *starts* it — so this primes the
+  // element the moment the needle is grabbed, muted and instantly paused,
+  // purely to establish the gesture-unlock before the real play happens.
+  const primeAudioForIOS = () => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    const wasMuted = audio.muted;
+    audio.muted = true;
+    const playPromise = audio.play();
+    if (playPromise && typeof playPromise.then === "function") {
+      playPromise
+        .then(() => {
+          audio.pause();
+          audio.muted = wasMuted;
+        })
+        .catch(() => {
+          audio.muted = wasMuted;
+        });
+    } else {
+      audio.muted = wasMuted;
+    }
+  };
+
   // Dropping the needle into a groove — the only way sound ever starts.
   // Requires the motor to be running; the crackle marks the contact.
   //
@@ -694,7 +673,8 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
     if (loadedAlbum && trackIndex < loadedAlbum.tracks.length - 1) {
       // More tracks left on the record — the engine-driving effect above
       // picks up the new trackIndex and starts it, since status stays
-      // "playing" throughout.
+      // "playing" throughout. Crackle marks this next song starting too.
+      playCrackle();
       setTrackIndex(trackIndex + 1);
       setProgress(0);
     } else {
@@ -735,10 +715,10 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
       beginSpotifyLogin();
       return;
     }
-    // Cancel anything left over from a previous pick — a pending or still
-    // fading crackle — so a fast string of selections can't stack or leave
-    // a stray one playing for the wrong record.
-    clearCrackleTimers();
+    // Cancel anything left over from a previous pick — a still-playing
+    // crackle — so a fast string of selections can't stack or leave a
+    // stray one playing for the wrong record.
+    clearCrackleTimer();
     stop();
     setTableOn(false);
     setTouchMove(false);
@@ -778,13 +758,12 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
         platterRef={platterRef}
         tableOn={tableOn}
         volume={volume}
-        noiseLevel={noiseLevel}
+        onPrimeAudio={primeAudioForIOS}
         onSeek={seekTrack}
         onResume={resumeAtCurrentPosition}
         onStop={stop}
         onToggleTable={toggleTable}
         onVolumeChange={setVolume}
-        onNoiseChange={setNoiseLevel}
         onScrub={handleScrub}
         onScrubEnd={handleScrubEnd}
       />
@@ -843,12 +822,6 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
         ref={crackleRef}
         src="/audio/crackle.mp3"
         preload="auto"
-      />
-      <audio
-        ref={noiseRef}
-        src="/audio/crackle.mp3"
-        preload="auto"
-        loop
       />
     </div>
   );
