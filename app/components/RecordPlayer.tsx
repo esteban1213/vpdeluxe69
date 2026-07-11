@@ -585,6 +585,14 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
   // element the moment the needle is grabbed, muted and instantly paused,
   // purely to establish the gesture-unlock before the real play happens.
   const primeAudioForIOS = () => {
+    // The Spotify Web Playback SDK plays through its own internal (EME-backed)
+    // media element, separate from our <audio> ref — iOS Safari locks that one
+    // independently, and the SDK exposes activateElement() specifically to
+    // unlock it. It must be invoked synchronously inside a real user gesture,
+    // same as the plain <audio> priming below, or the very first Spotify
+    // playback attempt silently produces no sound (subsequent attempts work
+    // because the page's interaction window is still fresh).
+    spotifyRef.current?.activateElement?.().catch(() => {});
     const audio = audioRef.current;
     if (!audio) return;
     audioPlayCommittedRef.current = false;
