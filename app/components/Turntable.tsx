@@ -374,7 +374,7 @@ export default function Turntable({
     if (!discDragRef.current) return;
     discDragRef.current = null;
     setDiscScrubbing(false);
-    if (status === "playing") {
+    if (tableOn) {
       resumeAutoSpin();
     } else {
       freezeManualSpin();
@@ -382,13 +382,15 @@ export default function Turntable({
     onScrubEnd();
   };
 
-  // Playback starting (or resuming) after a drag left the disc frozen mid
-  // pause/stop hands control back to the CSS animation smoothly from
-  // wherever it was left, instead of it staying frozen forever.
+  // The motor (not playback) is what actually spins the disc — CSS drives
+  // the spin off `data-spinning`, which tracks `tableOn`. Hand control back
+  // to the CSS animation whenever the motor turns on, so a disc dragged
+  // (and frozen) while powered off still spins up correctly once Power is
+  // pressed, even before the needle drops into a groove.
   useEffect(() => {
-    if (status === "playing") resumeAutoSpin();
+    if (tableOn) resumeAutoSpin();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status]);
+  }, [tableOn]);
 
   // Loading a different record onto the platter always starts its spin
   // fresh — clear any manual override left over from the previous record

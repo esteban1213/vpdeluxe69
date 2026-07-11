@@ -1,37 +1,90 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 import { Swiper, SwiperSlide } from "swiper/react";
 import { EffectCards } from "swiper/modules";
 import "swiper/css";
 import "swiper/css/effect-cards";
 import type { Swiper as SwiperClass } from "swiper/types";
 import type { Album } from "./RecordPlayer";
+import AlbumSleeveBack from "./AlbumSleeveBack";
 
 type Props = {
   albums: Album[];
   hiddenDiscIds: string[];
-  visible: boolean;
+  /** The id of whichever album is currently on the platter — its card shows
+   *  a flipped-over sleeve back (blurred cover + track list) instead of the
+   *  plain cover, since the record itself isn't in the sleeve right now. */
+  loadedAlbumId: string | undefined;
+  /** Which track of the loaded album is playing, to highlight it in that
+   *  flipped sleeve's track list */
+  currentTrackIndex: number;
+  /** Fully revealed vs. just peeking at the bottom edge */
+  expanded: boolean;
   onSelect: (index: number) => void;
+  /** Picking a track directly from the loaded album's flipped sleeve */
+  onSelectTrack: (trackIndex: number) => void;
   onActivity: () => void;
+  /** An upward swipe on the peeked caption — desktop gets this for free
+   *  via :hover, so this only really fires on touch */
+  onExpand: () => void;
+  /** A downward swipe on the expanded caption */
+  onCollapse: () => void;
   /** Reports whichever card is currently front-and-center, for e.g. a background */
   onActiveChange: (album: Album | undefined) => void;
   registerDisc: (id: string, el: HTMLElement | null) => void;
   onSwiper: (swiper: SwiperClass) => void;
 };
 
+// Vertical drag distance (px) that counts as a deliberate swipe rather than
+// an incidental wobble while tapping the caption handle.
+const SWIPE_REVEAL_THRESHOLD_PX = 24;
+
 export default function AlbumCarousel({
   albums,
   hiddenDiscIds,
-  visible,
+  loadedAlbumId,
+  currentTrackIndex,
+  expanded,
   onSelect,
+  onSelectTrack,
   onActivity,
+  onExpand,
+  onCollapse,
   onActiveChange,
   registerDisc,
   onSwiper,
 }: Props) {
   const [activeIndex, setActiveIndex] = useState(0);
   const activeAlbum = albums[activeIndex];
+  const captionDragStartY = useRef<number | null>(null);
+
+  // The caption pill is the bit that stays visible in the peeked state (it's
+  // the last child, so it's what's left on screen once the rest scrolls off
+  // the bottom edge) — it doubles as the touch "handle": swipe up to reveal
+  // the full carousel, swipe down to tuck it back away.
+  const handleCaptionPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    captionDragStartY.current = e.clientY;
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+
+  const handleCaptionPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const startY = captionDragStartY.current;
+    if (startY === null) return;
+    const dy = e.clientY - startY;
+    if (dy <= -SWIPE_REVEAL_THRESHOLD_PX) {
+      captionDragStartY.current = null;
+      onExpand();
+    } else if (dy >= SWIPE_REVEAL_THRESHOLD_PX) {
+      captionDragStartY.current = null;
+      onCollapse();
+    }
+  };
+
+  const handleCaptionPointerEnd = () => {
+    captionDragStartY.current = null;
+  };
 
   useEffect(() => {
     onActiveChange(activeAlbum);
@@ -50,7 +103,7 @@ export default function AlbumCarousel({
   return (
     <div
       className="album-carousel"
-      data-visible={visible}
+      data-expanded={expanded}
       onPointerDown={onActivity}
       onClick={(e) => e.stopPropagation()}
     >
@@ -111,6 +164,19 @@ export default function AlbumCarousel({
                   alt=""
                 />
               </span>
+              {loadedAlbumId === album.id && (
+                // The record itself isn't in its sleeve right now — it's
+                // out on the platter — so show the sleeve's flipped-over
+                // back instead: a scrollable track list tinted with the
+                // cover's average color, like flipping a real record
+                // jacket over to read the songs while it spins.
+                <AlbumSleeveBack
+                  album={album}
+                  currentTrackIndex={currentTrackIndex}
+                  onSelectTrack={onSelectTrack}
+                />
+              )}
+
               <img
                 className="album-sleeve"
                 src={album.cover}
@@ -121,9 +187,14 @@ export default function AlbumCarousel({
         ))}
       </Swiper>
       {activeAlbum && (
-        <div className="album-caption">
+        <div
+          className="album-caption"
+          onPointerDown={handleCaptionPointerDown}
+          onPointerMove={handleCaptionPointerMove}
+          onPointerUp={handleCaptionPointerEnd}
+          onPointerCancel={handleCaptionPointerEnd}
+        >
           <span className="album-title">{activeAlbum.title}</span>
-          <span className="album-artist">{activeAlbum.artist}</span>
         </div>
       )}
     </div>

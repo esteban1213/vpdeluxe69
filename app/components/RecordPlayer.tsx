@@ -66,7 +66,9 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
   // that the async prime-cleanup callback in primeAudioForIOS can skip its
   // audio.pause() when the real play() already beat it to the punch.
   const audioPlayCommittedRef = useRef(false);
-  const carouselHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const carouselCollapseTimer = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   const [loadedIndex, setLoadedIndex] = useState<number | null>(null);
   const [pendingIndex, setPendingIndex] = useState<number | null>(null);
   const [flight, setFlight] = useState<Flight | null>(null);
@@ -77,7 +79,10 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
   const [spotifyAuthed, setSpotifyAuthed] = useState(false);
   const [spotifyReady, setSpotifyReady] = useState(false);
   const [spotifyAlbums, setSpotifyAlbums] = useState<Album[]>([]);
-  const [carouselVisible, setCarouselVisible] = useState(true);
+  // The carousel is now always on screen (peeking at the bottom) — this
+  // just tracks whether it's fully expanded (vs. peeked), for touch's
+  // swipe-to-reveal since it has no :hover to rely on.
+  const [carouselExpanded, setCarouselExpanded] = useState(true);
   const [browsingAlbum, setBrowsingAlbum] = useState<Album | undefined>(
     undefined,
   );
@@ -111,49 +116,59 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
     : audioRef.current?.duration || 0;
   const elapsedSeconds = progress * trackDurationSec;
 
-  // How long the album carousel stays up with no interaction before it
-  // auto-hides so the (now fixed-position) turntable can stand alone.
-  const CAROUSEL_AUTOHIDE_MS = 5000;
+  // How long the carousel stays expanded with no interaction before it
+  // collapses back down to its peek. Desktop doesn't need this at all —
+  // :hover alone handles reveal/collapse there — this is really for touch,
+  // where "expanded" is a sticky JS state until swiped shut or timed out.
+  const CAROUSEL_AUTOCOLLAPSE_MS = 5000;
 
-  const clearCarouselAutoHide = () => {
-    if (carouselHideTimer.current) {
-      clearTimeout(carouselHideTimer.current);
-      carouselHideTimer.current = null;
+  const clearCarouselAutoCollapse = () => {
+    if (carouselCollapseTimer.current) {
+      clearTimeout(carouselCollapseTimer.current);
+      carouselCollapseTimer.current = null;
     }
   };
 
-  const scheduleCarouselAutoHide = () => {
-    clearCarouselAutoHide();
-    carouselHideTimer.current = setTimeout(() => {
-      setCarouselVisible(false);
-    }, CAROUSEL_AUTOHIDE_MS);
+  const scheduleCarouselAutoCollapse = () => {
+    clearCarouselAutoCollapse();
+    carouselCollapseTimer.current = setTimeout(() => {
+      setCarouselExpanded(false);
+    }, CAROUSEL_AUTOCOLLAPSE_MS);
   };
 
-  // Hide immediately, e.g. once a record lands and starts playing
-  const dismissCarousel = () => {
-    clearCarouselAutoHide();
-    setCarouselVisible(false);
+  // Collapse immediately, e.g. once a record lands and starts playing
+  const collapseCarousel = () => {
+    clearCarouselAutoCollapse();
+    setCarouselExpanded(false);
   };
 
-  // Any tap/swipe on the carousel resets its inactivity clock
+  // An upward swipe on the peeked carousel (touch, no :hover available)
+  // reveals it fully, same as hovering does on desktop.
+  const expandCarousel = () => {
+    setCarouselExpanded(true);
+    scheduleCarouselAutoCollapse();
+  };
+
+  // Any tap/swipe on the already-expanded carousel resets its inactivity
+  // clock. A no-op while peeked — the carousel isn't "expanded" yet, so
+  // there's no auto-collapse timer to keep alive.
   const handleCarouselActivity = () => {
-    if (!carouselVisible) return;
-    scheduleCarouselAutoHide();
+    if (!carouselExpanded) return;
+    scheduleCarouselAutoCollapse();
   };
 
   const toggleCarousel = () => {
-    if (carouselVisible) {
-      dismissCarousel();
+    if (carouselExpanded) {
+      collapseCarousel();
     } else {
-      setCarouselVisible(true);
-      scheduleCarouselAutoHide();
+      expandCarousel();
     }
   };
 
-  // Start the inactivity clock for the carousel's initial visible state
+  // Start the inactivity clock for the carousel's initial expanded state
   useEffect(() => {
-    scheduleCarouselAutoHide();
-    return clearCarouselAutoHide;
+    scheduleCarouselAutoCollapse();
+    return clearCarouselAutoCollapse;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -432,9 +447,9 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
         setStatus("stopped");
         setTableOn(false);
         setTouchMove(true);
-        // The disc has landed — the crate can get out of the way now that
-        // the animation is fully done.
-        dismissCarousel();
+        // The disc has landed — the crate can collapse back to its peek
+        // now that the animation is fully done.
+        collapseCarousel();
       }
     };
 
@@ -626,19 +641,21 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
     }
   };
 
-  // Dropping the needle into a groove — the only way sound ever starts.
-  // Requires the motor to be running; the crackle marks the contact.
+  // Actually drops the needle onto a track's start groove and starts it —
+  // shared by the tonearm (seekTrack, below, which requires the motor
+  // already running) and the sleeve's flipped-over track list
+  // (selectTrackFromSleeve, further below, which turns the motor on for you
+  // instead of no-op'ing). Callers must have already checked
+  // loadedAlbum/busy.
   //
   // iOS Safari only allows audio.play() to succeed when it's called
-  // synchronously inside a user-gesture handler (the tonearm's pointerup,
-  // which is what calls this). The status-driven effect above starts
-  // playback too, but only after a setState + re-render — one tick too
-  // late for iOS's autoplay policy, which silently blocks it. So this
-  // starts the right engine directly, right here, instead of only flipping
-  // `status` and waiting for the effect to notice.
-  const seekTrack = (index: number) => {
-    if (!loadedAlbum || busy || !tableOn) return;
-    const track = loadedAlbum.tracks[index];
+  // synchronously inside a user-gesture handler. Both callers invoke this
+  // directly from their own click/pointerup handler rather than only
+  // flipping `status` and waiting for the status-driven effect above to
+  // notice — that effect fires after a setState + re-render, one tick too
+  // late for iOS's autoplay policy, which silently blocks it.
+  const dropNeedleOnTrack = (index: number) => {
+    const track = loadedAlbum!.tracks[index];
     const trackIsSpotify = !!track.spotifyUri && useSpotifySDK;
     const audioSrc =
       track.url ?? (!trackIsSpotify ? track.previewUrl : undefined);
@@ -670,6 +687,40 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
         });
       }
     }
+  };
+
+  // Dropping the needle into a groove — the only way sound ever starts via
+  // the physical tonearm. Requires the motor to be running; the crackle
+  // marks the contact.
+  const seekTrack = (index: number) => {
+    if (!loadedAlbum || busy || !tableOn) return;
+    dropNeedleOnTrack(index);
+  };
+
+  // Picking a track from the sleeve's flipped-over track list. If a song
+  // is already playing, treat it like skipping to that track (same as the
+  // tonearm's needle-drop). Otherwise this is just browsing — move the
+  // needle onto that groove and leave it paused there rather than forcing
+  // playback to start; the engine-driving effect above still keeps the
+  // right source loaded and ready, so pressing play afterwards resumes
+  // from exactly this track.
+  const selectTrackFromSleeve = (index: number) => {
+    if (!loadedAlbum || busy) return;
+    if (status === "playing") {
+      dropNeedleOnTrack(index);
+      return;
+    }
+    if (index === trackIndex) {
+      if (isSpotifyTrack) {
+        spotifyRef.current?.seek(0);
+      } else if (audioRef.current) {
+        audioRef.current.currentTime = 0;
+      }
+    } else {
+      setTrackIndex(index);
+    }
+    setProgress(0);
+    setStatus("paused");
   };
 
   // Dropping the needle onto the "Current Time" groove: resumes exactly
@@ -866,9 +917,14 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
       <AlbumCarousel
         albums={albums}
         hiddenDiscIds={hiddenDiscIds}
-        visible={carouselVisible}
+        loadedAlbumId={loadedAlbum?.id}
+        currentTrackIndex={trackIndex}
+        expanded={carouselExpanded}
         onSelect={selectAlbum}
+        onSelectTrack={selectTrackFromSleeve}
         onActivity={handleCarouselActivity}
+        onExpand={expandCarousel}
+        onCollapse={collapseCarousel}
         onActiveChange={setBrowsingAlbum}
         registerDisc={registerDisc}
         onSwiper={(swiper) => {
