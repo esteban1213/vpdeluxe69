@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { PointerEvent as ReactPointerEvent, RefObject } from "react";
-import type { Album, PlaybackStatus } from "./RecordPlayer";
+import type { Album, PlaybackStatus, RecordSide } from "./RecordPlayer";
 import { RECORD_TO_PLATTER_RATIO } from "./RecordPlayer";
 import TimeDisplay from "./TimeDisplay";
 import Tracklist from "./Tracklist";
+import RecordLabel from "./RecordLabel";
 
 type Props = {
   album?: Album;
@@ -43,6 +45,23 @@ type Props = {
    *  itself (both of which stop their own clicks from bubbling this far)
    *  counts as "outside" the track list and closes it */
   onCloseTracklist: () => void;
+  /** Whether the loaded album is split across two sides (more than 10
+   *  tracks) — the Flip button and side badge only appear when true */
+  hasSides: boolean;
+  /** Which side of the record is currently loaded */
+  side: RecordSide;
+  /** Whether the Flip button is currently pressable — motor off, needle
+   *  at rest, nothing else busy (e.g. mid-flip already) */
+  canFlip: boolean;
+  /** Flip to the other side */
+  onFlip: () => void;
+  /** Whether the flip (zoom/turn/zoom-back) animation is currently playing */
+  flipping: boolean;
+  /** Fired once the flip animation finishes */
+  onFlipAnimationEnd: () => void;
+  /** Added to the floating track list's displayed track numbers, so side
+   *  B continues the album's original numbering instead of restarting at 1 */
+  trackNumberOffset: number;
 };
 
 type Geometry = {
@@ -50,6 +69,21 @@ type Geometry = {
   center: { x: number; y: number };
   armLen: number;
   recordRadius: number;
+};
+
+// Where/how big to render the flip portal clone. Deliberately not a
+// DOMRect: width/height come from offsetWidth/offsetHeight (the disc's
+// true, untransformed layout size), not getBoundingClientRect() (which
+// returns the *rotated* axis-aligned bounding box — inflated whenever the
+// disc isn't sitting at a multiple of 90°, which is most of the time for
+// a spun or manually-dragged disc). Using the inflated box here would
+// size the clone larger than the real disc for its entire lifetime, only
+// "shrinking" when it unmounts and the true-sized real disc reappears.
+type FlipOverlayRect = {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
 };
 
 type SnapPoint = {
@@ -211,10 +245,42 @@ export default function Turntable({
   currentTrackIndex,
   onSelectTrack,
   onCloseTracklist,
+  hasSides,
+  side,
+  canFlip,
+  onFlip,
+  flipping,
+  onFlipAnimationEnd,
+  trackNumberOffset,
 }: Props) {
   const deckRef = useRef<HTMLDivElement>(null);
   const tonearmRef = useRef<HTMLDivElement>(null);
   const recordRef = useRef<HTMLDivElement>(null);
+  // .record's inner "face" — grooves + label, everything the flip
+  // animation scales/turns. Kept separate from recordRef, which handles
+  // spin/drag, so the two transforms never contend for the same element.
+  const recordTurnRef = useRef<HTMLDivElement>(null);
+  // The zoomed flip clone, portaled straight into document.body (see the
+  // flip effects below) — escapes every ancestor stacking context
+  // (.turntable's backdrop-filter, .platter's perspective, etc.), any one
+  // of which silently caps a z-index set inside it. This is the only way
+  // to *guarantee* the zoomed disc paints above the deck's other controls
+  // rather than hoping the z-index math works out.
+  const flipOverlayRef = useRef<HTMLDivElement>(null);
+  // The real disc's on-screen position/size at the moment a flip starts —
+  // also doubles as "is the portal clone currently mounted".
+  const [flipRect, setFlipRect] = useState<FlipOverlayRect | null>(null);
+  // .record's current spin rotation (rotate, Z-axis — motor/manual-drag,
+  // frozen since flipping only ever starts with the motor off) at the
+  // moment a flip starts. The clone doesn't otherwise know this — it's a
+  // fresh DOM node with no spin transform of its own — so without baking
+  // it in, the clone would visibly snap to 0° the instant the flip began.
+  const flipSpinDegRef = useRef(0);
+  // Total accumulated rotateY on the disc, in degrees — always a multiple
+  // of 180, and never reset back down after a flip (only forward, +180
+  // per flip) so consecutive flips always turn the same direction instead
+  // of visibly snapping back through the turn they just made.
+  const flipRotationRef = useRef(0);
   const rotationRef = useRef(0);
   const manualSpinRef = useRef(false);
   const discDragRef = useRef<DiscDrag | null>(null);
@@ -282,8 +348,14 @@ export default function Turntable({
   };
 
   const handlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
-    // The needle only comes off its rest while the platter is spinning
-    if (!album || busy || !tableOn) return;
+    // Picking the needle back up is always allowed once it's actually
+    // sitting on the disc (needleAngle non-null — playing or paused),
+    // even with the motor off, so it can be lifted back off. Only
+    // *dropping* it somewhere new to start playback needs power — that's
+    // independently enforced by seekTrack/resumeAtCurrentPosition, not
+    // here — so with the motor off and the needle already at rest, this
+    // still blocks picking it up and dropping it straight onto a groove.
+    if (!album || busy || (!tableOn && needleAngle === null)) return;
     e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
     // Prime audio right at the moment of contact — the earliest, most
@@ -414,7 +486,8 @@ export default function Turntable({
   // Loading a different record onto the platter always starts its spin
   // fresh — clear any manual override left over from the previous record
   // (e.g. dragged while paused, then a new album was picked) so it can't
-  // carry over onto this one.
+  // carry over onto this one. Also resets which flip face is showing, so
+  // a new album never inherits the old one's mid-rotation state.
   useEffect(() => {
     discDragRef.current = null;
     setDiscScrubbing(false);
@@ -425,15 +498,123 @@ export default function Turntable({
       recordEl.style.animationName = "";
       recordEl.style.animationDelay = "";
     }
+    flipRotationRef.current = 0;
+    setFlipRect(null);
+    const turnEl = recordTurnRef.current;
+    if (turnEl) {
+      turnEl.style.transform = "";
+      turnEl.style.visibility = "";
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [album?.id]);
 
+  // Flip step 1: the instant flipping starts, snapshot the real disc's
+  // on-screen rect and hide it — the portal clone (rendered once flipRect
+  // is set, see the JSX below) takes over from here. Hiding the original
+  // instead of leaving it in place avoids a double-image while the clone
+  // is on top of it.
+  useEffect(() => {
+    if (!flipping) {
+      setFlipRect(null);
+      return;
+    }
+    const recordEl = recordRef.current;
+    const turnEl = recordTurnRef.current;
+    if (!recordEl || !turnEl) {
+      onFlipAnimationEnd();
+      return;
+    }
+    flipSpinDegRef.current = getCurrentRotationDeg(recordEl);
+    // Center from the (possibly rotation-inflated) bounding box — rotating
+    // around the center doesn't move the center itself, so this part is
+    // still accurate — but size from offsetWidth/Height, the disc's real,
+    // untransformed dimensions. See FlipOverlayRect for why that matters.
+    const rect = turnEl.getBoundingClientRect();
+    const width = turnEl.offsetWidth;
+    const height = turnEl.offsetHeight;
+    setFlipRect({
+      left: rect.left + rect.width / 2 - width / 2,
+      top: rect.top + rect.height / 2 - height / 2,
+      width,
+      height,
+    });
+    turnEl.style.visibility = "hidden";
+    return () => {
+      turnEl.style.visibility = "";
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flipping]);
+
+  // Flip step 2: once the portal clone exists (flipRect just got set, so
+  // it's rendered on this pass), actually run the zoom-in/turn/zoom-back
+  // on *it* instead of the real disc. Grooves are a symmetric repeating
+  // pattern, so turning them never looks mirrored; only the label would —
+  // that's handled separately by .record-face-a/-b, which are static,
+  // pre-rotated 180° apart with backface-visibility hidden, so they ride
+  // along with this rotation for free and swap which one's front-facing
+  // (and right-way-round, not mirrored) purely from crossing 90°/270°.
+  useEffect(() => {
+    if (!flipRect) return;
+    const cloneEl = flipOverlayRef.current;
+    if (!cloneEl) return;
+    const from = flipRotationRef.current;
+    const to = from + 180;
+    // Locked for the whole animation — the disc isn't actually spinning
+    // during a flip (motor's off), so this just matches whatever angle
+    // the real disc was frozen at, keeping the clone visually seamless
+    // with it at both the start and end of the flip.
+    const spin = flipSpinDegRef.current;
+
+    const animation = cloneEl.animate(
+      [
+        { transform: `rotate(${spin}deg) scale(1) rotateY(${from}deg)`, offset: 0 },
+        {
+          transform: `rotate(${spin}deg) scale(1.5) rotateY(${from}deg)`,
+          offset: 0.3,
+          easing: "ease-in",
+        },
+        {
+          transform: `rotate(${spin}deg) scale(1.5) rotateY(${to}deg)`,
+          offset: 0.7,
+          easing: "ease-in-out",
+        },
+        {
+          transform: `rotate(${spin}deg) scale(1) rotateY(${to}deg)`,
+          offset: 1,
+          easing: "ease-out",
+        },
+      ],
+      // Holds the last keyframe (scale(1), true size) instead of reverting
+      // to an unstyled state the instant the active duration ends — without
+      // this, there's a window between the animation naturally finishing
+      // and onfinish's JS actually running/unmounting the clone where it
+      // could flash back to no transform at all.
+      { duration: 900, fill: "forwards" },
+    );
+
+    animation.onfinish = () => {
+      flipRotationRef.current = to;
+      // Carry the finished rotation over to the real disc *before* it
+      // becomes visible again (step 1's cleanup, triggered once
+      // onFlipAnimationEnd below flips `flipping` back to false) — so
+      // there's no frame where it flashes its old, un-flipped state.
+      const turnEl = recordTurnRef.current;
+      if (turnEl) {
+        turnEl.style.transform = `scale(1) rotateY(${to}deg)`;
+      }
+      onFlipAnimationEnd();
+    };
+    return () => animation.cancel();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flipRect]);
+
   return (
-    // Tapping anywhere outside the player (the background) reveals the
-    // library — stop the click here so interacting with the deck itself
-    // never counts as "outside". Anything that reaches this far (the LCD
-    // and the track list both stop their own clicks first) also counts as
-    // "outside the track list", so it closes that too.
+    <>
+    {/* Tapping anywhere outside the player (the background) reveals the
+        library — stop the click here so interacting with the deck itself
+        never counts as "outside". Anything that reaches this far (the LCD
+        and the track list both stop their own clicks first) also counts as
+        "outside the track list", so it closes that too. */}
     <div
       className="turntable"
       onClick={(e) => {
@@ -449,12 +630,16 @@ export default function Turntable({
         className="deck"
         ref={deckRef}
       >
-        <TimeDisplay seconds={elapsedSeconds} onClick={onToggleTracklist} />
+        <TimeDisplay
+          seconds={elapsedSeconds}
+          onClick={onToggleTracklist}
+        />
         {tracklistOpen && album && (
           <Tracklist
             album={album}
             currentTrackIndex={currentTrackIndex}
             onSelectTrack={onSelectTrack}
+            trackNumberOffset={trackNumberOffset}
           />
         )}
 
@@ -479,12 +664,34 @@ export default function Turntable({
               onPointerUp={endDiscDrag}
               onPointerCancel={endDiscDrag}
             >
-              <img
-                className="record-label"
-                src={album.cover}
-                alt={album.title}
-                draggable={false}
-              />
+              {/* The disc's actual visible face — everything the flip
+                  animation scales/turns, kept separate from .record
+                  (spin/drag) above. Inside it, a two-sided flip card:
+                  face-a/-b are pre-rotated 180° apart with
+                  backface-visibility hidden, so whichever one is
+                  currently front-facing renders right-way-round rather
+                  than as a mirror image of the other. Both show the same
+                  cover (there's no separate per-side art) — only the
+                  badge differs, which is what actually sells the flip. */}
+              <div
+                ref={recordTurnRef}
+                className="record-turn"
+              >
+                <div className="record-flip">
+                  <div className="record-face record-face-a">
+                    <RecordLabel
+                      src={album.cover}
+                      alt={album.title}
+                    />
+                  </div>
+                  <div className="record-face record-face-b">
+                    <RecordLabel
+                      src={album.cover}
+                      alt={album.title}
+                    />
+                  </div>
+                </div>
+              </div>
             </div>
           ) : (
             <span className="platter-hint">VP Deluxe 69</span>
@@ -501,7 +708,7 @@ export default function Turntable({
               ? { transition: "transform 0.15s ease" }
               : {}),
             cursor:
-              album && !busy && tableOn
+              album && !busy && (tableOn || needleAngle !== null)
                 ? drag
                   ? "grabbing"
                   : "grab"
@@ -511,7 +718,11 @@ export default function Turntable({
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
           onPointerCancel={() => setDrag(null)}
-        />
+        >
+          <span className="tonearm-pivot" />
+          <span className="tonearm-shaft" />
+          <span className="tonearm-headshell" />
+        </div>
         {drag?.snap && (
           <div
             className="needle-tooltip"
@@ -536,7 +747,59 @@ export default function Turntable({
           />
           <span className="control-caption">Power</span>
         </div>
+        {/* Mirrors Power on the opposite side of the deck — only for
+            records actually split into sides (see albumHasSides). */}
+        {hasSides && (
+          <div className="control-with-caption flip-control">
+            <button
+              onClick={onFlip}
+              disabled={!canFlip}
+              aria-label={`Flip to side ${side === "A" ? "B" : "A"}`}
+            />
+            <span className="control-caption">Flip</span>
+          </div>
+        )}
       </div>
     </div>
+    {/* The flip animation's zoomed clone — portaled to document.body so
+        it escapes every ancestor stacking context (see the flip effects
+        above) instead of hoping z-index alone wins against them. Purely
+        decorative: pointer-events off, and it only exists while flipRect
+        is set (i.e. mid-flip). */}
+    {flipRect &&
+      album &&
+      createPortal(
+        <div
+          className="record-flip-overlay"
+          style={{
+            left: flipRect.left,
+            top: flipRect.top,
+            width: flipRect.width,
+            height: flipRect.height,
+          }}
+        >
+          <div
+            ref={flipOverlayRef}
+            className="record-turn"
+          >
+            <div className="record-flip">
+              <div className="record-face record-face-a">
+                <RecordLabel
+                  src={album.cover}
+                  alt=""
+                />
+              </div>
+              <div className="record-face record-face-b">
+                <RecordLabel
+                  src={album.cover}
+                  alt=""
+                />
+              </div>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
   );
 }

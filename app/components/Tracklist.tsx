@@ -7,6 +7,9 @@ type Props = {
   album: Album;
   currentTrackIndex: number;
   onSelectTrack: (trackIndex: number) => void;
+  /** Added to each displayed track number — lets side B's list continue
+   *  the album's original numbering instead of restarting at 1 */
+  trackNumberOffset: number;
 };
 
 // Falls back to this dark tint until the cover's average color has loaded
@@ -19,6 +22,7 @@ export default function Tracklist({
   album,
   currentTrackIndex,
   onSelectTrack,
+  trackNumberOffset,
 }: Props) {
   const { data: rgb } = useColor(album.cover, "rgbArray", {
     crossOrigin: "anonymous",
@@ -56,7 +60,9 @@ export default function Tracklist({
             }
           }}
         >
-          <span className="tracklist-float-track-index">{i + 1}</span>
+          <span className="tracklist-float-track-index">
+            {trackNumberOffset + i + 1}
+          </span>
           <span className="tracklist-float-track-title">{track.title}</span>
         </li>
       ))}

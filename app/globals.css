@@ -224,6 +224,15 @@ a {
 
 .platter {
   position: relative;
+  /* `perspective` (below) makes this a stacking-context boundary of its
+     own, same as `transform` would — which traps .record's z-index
+     *inside* .platter, so it can never actually outrank siblings like
+     .power-control/.flip-control no matter what z-index .record itself
+     has. This is the real "am I above other elements" lever; .record's
+     own z-index only matters for ordering within .platter (e.g. above
+     .platter-spindle). Below .tonearm (z-index: 3) so the needle still
+     reads as sitting on top of the disc normally. */
+  z-index: 1;
   width: 240px;
   height: 240px;
   border-radius: 50%;
@@ -231,6 +240,9 @@ a {
   display: flex;
   align-items: center;
   justify-content: center;
+  /* Gives the flip animation's rotateY (see Turntable's flip effect) real
+     3D depth instead of a flat horizontal squish. */
+  perspective: 600px;
 }
 
 /* The bare spindle peg a record drops onto — shown only while the platter
@@ -273,20 +285,25 @@ a {
   white-space: nowrap;
 }
 
+/* Outer hit-area/positioning box only — pointer handlers, the spin
+   transform (motor/manual scrub), and z-index all live here. Purely
+   structural: no background or mask of its own, since .record-turn
+   (its one child, sized 100%) renders everything visible. Splitting
+   spin (here) from the flip (.record-turn, below) onto two different
+   elements means the two transforms never fight over the same inline
+   style — spin keeps rotating the same way it always has regardless of
+   whatever the flip is doing. */
 .record {
+  position: relative;
   width: 220px;
   height: 220px;
   border-radius: 50%;
-  background: repeating-radial-gradient(
-    circle at center,
-    #111 0 2px,
-    #1f1f1f 2px 4px
-  );
-  display: flex;
-  align-items: center;
-  justify-content: center;
   animation: record-spin 1.8s linear infinite;
   animation-play-state: paused;
+  /* Only matters for ordering within .platter (above .platter-spindle) —
+     .platter itself (see its own z-index) is what actually determines
+     whether the disc paints above the deck's other chrome. */
+  z-index: 2;
   /* Grabbed and rotated directly to scrub the current track's position */
   touch-action: none;
   will-change: transform;
@@ -298,8 +315,38 @@ a {
   animation-play-state: running;
 }
 
-.record {
+/* The flip animation's zoomed clone, portaled to document.body (see
+   Turntable's flip effects) — a direct child of <body>, so nothing any
+   ancestor in the real turntable tree does (backdrop-filter, perspective,
+   its own transform, etc. — any of which creates a stacking context that
+   would otherwise cap a z-index set inside it) can bury this under
+   anything. left/top/width/height are set inline to the real disc's
+   captured rect, so it sits exactly where the real disc is/was. */
+.record-flip-overlay {
+  position: fixed;
+  z-index: 9999;
+  pointer-events: none;
+}
+
+/* The disc's actual visible face — grooves, spindle cutout, and the
+   label — and what the flip animation (see Turntable's flip effect)
+   scales/turns. Grooves are a symmetric repeating pattern, so turning
+   *this* never looks mirrored; only the label would (handled separately
+   by .record-flip's two static, pre-rotated faces, below). */
+.record-turn {
   position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  background: repeating-radial-gradient(
+    circle at center,
+    #111 0 2px,
+    #1f1f1f 2px 4px
+  );
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transform-style: preserve-3d;
   /* A real cutout, not a painted-on dot — punches straight through the
      grooves and label to reveal .platter-spindle underneath, matching its
      size exactly (4px radius = 8px diameter, same as the spindle). */
@@ -311,11 +358,59 @@ a {
   mask-image: radial-gradient(circle at center, transparent 4px, #000 4px);
 }
 
-.record-label {
+/* Sized/centered exactly like the old single .record-label was — now a
+   two-sided flip card instead of a single image, so the flip animation
+   can turn it 180° without ever rendering a mirror-imaged face (see
+   .record-face's backface-visibility). Rides along with .record-turn's
+   own rotation for free — no animation of its own needed. */
+.record-flip {
+  position: relative;
   width: 45%;
   height: 45%;
+  transform-style: preserve-3d;
+}
+
+.record-face {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backface-visibility: hidden;
+}
+
+.record-face-b {
+  transform: rotateY(180deg);
+}
+
+.record-label {
+  width: 100%;
+  height: 100%;
   border-radius: 50%;
   object-fit: cover;
+  /* Fades in once actually loaded (see RecordLabel) instead of popping
+     in abruptly */
+}
+
+/* "A"/"B" side indicator, printed low on the label like a real record's
+   side marking — only rendered for albums actually split into sides. */
+.record-side-badge {
+  position: absolute;
+  top: 63%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.55);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
+  letter-spacing: 0.5px;
+  pointer-events: none;
 }
 
 /* Tiny Casio-style LCD showing elapsed track time, top-left of the deck.
@@ -362,6 +457,9 @@ a {
   position: absolute;
   top: 6px;
   right: -4px;
+  /* Above .record (z-index: 2) so the needle stays visibly on top of the
+     grooves instead of getting covered by the disc. */
+  z-index: 3;
   width: 30px;
   height: 120px;
   transform-origin: 50% 8px;
@@ -370,27 +468,71 @@ a {
   touch-action: none;
 }
 
-.tonearm::before {
-  content: "";
+/* Pivot/counterweight end — a shaded knob instead of a flat circle so it
+   actually reads as a turned metal part. */
+.tonearm-pivot {
   position: absolute;
   top: -4px;
   left: 50%;
-  width: 24px;
-  height: 24px;
+  width: 22px;
+  height: 22px;
   border-radius: 50%;
-  background: #8a8a8a;
+  background: radial-gradient(
+    circle at 35% 30%,
+    #e6e6e6 0%,
+    #9a9a9a 45%,
+    #4f4f4f 100%
+  );
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.5),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.3);
   transform: translateX(-50%);
 }
 
-.tonearm::after {
-  content: "";
+/* The rigid rod itself — thin, with a lengthwise highlight gradient so it
+   reads as a round metal tube rather than a flat bar. Stops short of the
+   bottom to leave room for the headshell to visually plug into it. */
+.tonearm-shaft {
   position: absolute;
-  top: 0;
+  top: 4px;
+  bottom: 14px;
+  left: 50%;
+  width: 4px;
+  border-radius: 2px;
+  background: linear-gradient(
+    90deg,
+    #6b6b6b 0%,
+    #e8e8e8 45%,
+    #b8b8b8 60%,
+    #5a5a5a 100%
+  );
+  box-shadow: 0 0 1px rgba(0, 0, 0, 0.5);
+  transform: translateX(-50%);
+}
+
+/* The cartridge housing at the business end of the arm, with the actual
+   stylus (::after) poking out its bottom toward the groove. */
+.tonearm-headshell {
+  position: absolute;
   bottom: 0;
   left: 50%;
-  width: 6px;
-  border-radius: 3px;
-  background: #cfcfcf;
+  width: 11px;
+  height: 18px;
+  border-radius: 2px 2px 3px 3px;
+  background: linear-gradient(180deg, #3a3a3a 0%, #161616 70%, #0a0a0a 100%);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  transform: translateX(-50%);
+}
+
+.tonearm-headshell::after {
+  content: "";
+  position: absolute;
+  bottom: -4px;
+  left: 50%;
+  width: 2px;
+  height: 6px;
+  border-radius: 1px;
+  background: linear-gradient(180deg, #d8d8d8 0%, #8a8a8a 100%);
   transform: translateX(-50%);
 }
 
@@ -419,6 +561,14 @@ a {
 .power-control {
   position: absolute;
   right: 10px;
+  bottom: -38px;
+}
+
+/* Mirrors .power-control on the opposite side of the deck, so Flip and
+   Power bookend the disc symmetrically. */
+.flip-control {
+  position: absolute;
+  left: 10px;
   bottom: -38px;
 }
 

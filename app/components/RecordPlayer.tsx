@@ -37,9 +37,30 @@ export type Album = {
 
 export type PlaybackStatus = "playing" | "paused" | "stopped";
 
+export type RecordSide = "A" | "B";
+
 type Flight = { index: number; dir: "out" | "back" };
 
 export const RECORD_TO_PLATTER_RATIO = 220 / 240;
+
+// Albums longer than this get split across two sides, like a real record's
+// limited per-side groove capacity — anything shorter just plays straight
+// through with no flip involved.
+const SIDE_SPLIT_TRACK_THRESHOLD = 10;
+
+const albumHasSides = (album: Album | undefined) =>
+  !!album && album.tracks.length > SIDE_SPLIT_TRACK_THRESHOLD;
+
+// [start, end) into `tracks` for the given side. Side A always takes the
+// extra track on an odd split.
+const getSideBounds = (
+  tracks: Track[],
+  side: RecordSide,
+): [start: number, end: number] => {
+  if (tracks.length <= SIDE_SPLIT_TRACK_THRESHOLD) return [0, tracks.length];
+  const aCount = Math.ceil(tracks.length / 2);
+  return side === "A" ? [0, aCount] : [aCount, tracks.length];
+};
 
 type Props = {
   albums: Album[];
@@ -89,6 +110,12 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
   // Whether the floating track list (under the deck's LCD) is open — off
   // by default; only tapping the LCD (see toggleTracklist) reveals it.
   const [tracklistOpen, setTracklistOpen] = useState(false);
+  // Which side of the loaded record is up — irrelevant for albums that
+  // don't split (see albumHasSides), but always tracked so it's ready the
+  // instant a long enough album loads.
+  const [recordSide, setRecordSide] = useState<RecordSide>("A");
+  // True for the ~1s the flip (zoom/turn/zoom-back) animation is playing.
+  const [flipping, setFlipping] = useState(false);
 
   const albums = useMemo(
     () => [...baseAlbums, ...spotifyAlbums],
@@ -97,16 +124,26 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
 
   const loadedAlbum = loadedIndex !== null ? albums[loadedIndex] : undefined;
   const flightAlbum = flight ? albums[flight.index] : undefined;
-  const busy = flight !== null || pendingIndex !== null;
-  const currentTrack = loadedAlbum?.tracks[trackIndex];
+  const busy = flight !== null || pendingIndex !== null || flipping;
+  const hasSides = albumHasSides(loadedAlbum);
+  // trackIndex/trackIndex-driven playback logic below all index into this
+  // side-scoped slice rather than the full album — a side flip is treated
+  // just like loading a fresh (virtual) record, trackIndex resetting to 0.
+  const [sideStart, sideEnd] = loadedAlbum
+    ? getSideBounds(loadedAlbum.tracks, recordSide)
+    : [0, 0];
+  const sideTracks = loadedAlbum
+    ? loadedAlbum.tracks.slice(sideStart, sideEnd)
+    : [];
+  const currentTrack = sideTracks[trackIndex];
   // The Web Playback SDK is desktop-only. On mobile browsers it never fires
   // "ready", so spotifyReady stays false. Detect that and route Spotify
   // tracks through the preview URL + plain <audio> instead — same path the
   // crackle uses, so iOS gesture trust is identical.
   const useSpotifySDK = spotifyReady;
   const isSpotifyTrack = !!currentTrack?.spotifyUri && useSpotifySDK;
-  const albumProgress = loadedAlbum
-    ? (trackIndex + progress) / loadedAlbum.tracks.length
+  const albumProgress = sideTracks.length
+    ? (trackIndex + progress) / sideTracks.length
     : 0;
   // Whichever record is "current" for backdrop purposes: on the platter,
   // mid-flight toward/away from it, or — if nothing's loaded yet — just
@@ -181,9 +218,11 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
   const closeTracklist = () => setTracklistOpen(false);
 
   // A fresh disc (or the platter emptying out) never inherits the previous
-  // album's open/closed track list state.
+  // album's open/closed track list state, nor a side flipped mid-browse on
+  // whatever was loaded before it.
   useEffect(() => {
     setTracklistOpen(false);
+    setRecordSide("A");
   }, [loadedIndex]);
 
   // Start the inactivity clock for the carousel's initial expanded state
@@ -594,6 +633,23 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
     }
   };
 
+  // Flipping the record swaps which side is loaded, same as picking up a
+  // real record and turning it over — only when the motor's off and the
+  // needle's back at rest, never mid-play. Track position resets to the
+  // start of the new side, same as loading any other fresh record.
+  const flipRecord = () => {
+    if (!loadedAlbum || !hasSides || busy) return;
+    if (tableOn || status !== "stopped") return;
+    setFlipping(true);
+    setRecordSide((side) => (side === "A" ? "B" : "A"));
+    setTrackIndex(0);
+    setProgress(0);
+    closeTracklist();
+  };
+
+  // Fired once the flip animation (Turntable) finishes playing
+  const finishFlip = () => setFlipping(false);
+
   // Silence both engines: also used when switching albums mid-play
   const stop = () => {
     const audio = audioRef.current;
@@ -675,7 +731,7 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
   // notice — that effect fires after a setState + re-render, one tick too
   // late for iOS's autoplay policy, which silently blocks it.
   const dropNeedleOnTrack = (index: number) => {
-    const track = loadedAlbum!.tracks[index];
+    const track = sideTracks[index];
     const trackIsSpotify = !!track.spotifyUri && useSpotifySDK;
     const audioSrc =
       track.url ?? (!trackIsSpotify ? track.previewUrl : undefined);
@@ -831,17 +887,19 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
   };
 
   const handleEnded = () => {
-    if (loadedAlbum && trackIndex < loadedAlbum.tracks.length - 1) {
-      // More tracks left on the record — the engine-driving effect above
+    if (trackIndex < sideTracks.length - 1) {
+      // More tracks left on this side — the engine-driving effect above
       // picks up the new trackIndex and starts it, since status stays
       // "playing" throughout. Crackle marks this next song starting too.
       playCrackle();
       setTrackIndex(trackIndex + 1);
       setProgress(0);
     } else {
-      // End of the album: power down the motor too (not just playback) —
-      // status flipping to "stopped" already sends the needle back to its
-      // rest position via Turntable's needle-angle effect.
+      // End of the side (or the whole album, for one that doesn't split):
+      // power down the motor too (not just playback) — status flipping to
+      // "stopped" already sends the needle back to its rest position via
+      // Turntable's needle-angle effect, and (on a split album) satisfies
+      // flipRecord's guard so the side can now be flipped.
       stopCrackle();
       setStatus("stopped");
       setTableOn(false);
@@ -898,6 +956,16 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
     (id): id is string => id !== undefined,
   );
 
+  // What Turntable (and, through it, Tracklist) actually renders tracks
+  // from — same album, but with `.tracks` narrowed to the current side, so
+  // both the needle's groove math and the floating track list stay scoped
+  // to whichever side is loaded.
+  const sideAlbum = loadedAlbum
+    ? { ...loadedAlbum, tracks: sideTracks }
+    : undefined;
+
+  const canFlip = hasSides && !busy && !tableOn && status === "stopped";
+
   return (
     // Tapping the background (anywhere the deck, carousel, and connect
     // button don't themselves capture) reveals the library and closes the
@@ -912,7 +980,7 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
       <SiteBackground cover={backgroundAlbum?.cover} />
       <div className="background-tap-zone" />
       <Turntable
-        album={loadedAlbum}
+        album={sideAlbum}
         status={status}
         busy={busy}
         albumProgress={albumProgress}
@@ -931,6 +999,13 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
         currentTrackIndex={trackIndex}
         onSelectTrack={selectTrackFromList}
         onCloseTracklist={closeTracklist}
+        hasSides={hasSides}
+        side={recordSide}
+        canFlip={canFlip}
+        onFlip={flipRecord}
+        flipping={flipping}
+        onFlipAnimationEnd={finishFlip}
+        trackNumberOffset={sideStart}
       />
       {spotifyAuthed ? null : (
         <button

@@ -11,8 +11,7 @@ export default function Home() {
         flexDirection: "column",
       }}
     >
-      <RecordPlayer albums={albums} />
-
+      <br />
       <p
         style={{
           fontSize: 10,
@@ -20,6 +19,8 @@ export default function Home() {
       >
         Vinny Records. © {CURRENT_YEAR} Vince P. All rights reserved.
       </p>
+      <RecordPlayer albums={albums} />
+
       <br />
     </main>
   );
