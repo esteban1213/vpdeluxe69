@@ -3,6 +3,7 @@ import type { PointerEvent as ReactPointerEvent, RefObject } from "react";
 import type { Album, PlaybackStatus } from "./RecordPlayer";
 import { RECORD_TO_PLATTER_RATIO } from "./RecordPlayer";
 import TimeDisplay from "./TimeDisplay";
+import Tracklist from "./Tracklist";
 
 type Props = {
   album?: Album;
@@ -29,6 +30,19 @@ type Props = {
   onScrub: (deltaSeconds: number) => void;
   /** Fires once a disc-scrub gesture ends, e.g. to flush a throttled seek */
   onScrubEnd: () => void;
+  /** Tapping the deck's LCD toggles the floating track list open/closed */
+  onToggleTracklist: () => void;
+  /** Whether the floating track list is currently open */
+  tracklistOpen: boolean;
+  /** Which track of the loaded album is playing, to highlight it in the
+   *  floating track list */
+  currentTrackIndex: number;
+  /** Picking a track directly from the floating track list */
+  onSelectTrack: (trackIndex: number) => void;
+  /** Any click within the turntable that isn't the LCD or the track list
+   *  itself (both of which stop their own clicks from bubbling this far)
+   *  counts as "outside" the track list and closes it */
+  onCloseTracklist: () => void;
 };
 
 type Geometry = {
@@ -192,6 +206,11 @@ export default function Turntable({
   onToggleTable,
   onScrub,
   onScrubEnd,
+  onToggleTracklist,
+  tracklistOpen,
+  currentTrackIndex,
+  onSelectTrack,
+  onCloseTracklist,
 }: Props) {
   const deckRef = useRef<HTMLDivElement>(null);
   const tonearmRef = useRef<HTMLDivElement>(null);
@@ -412,10 +431,15 @@ export default function Turntable({
   return (
     // Tapping anywhere outside the player (the background) reveals the
     // library — stop the click here so interacting with the deck itself
-    // never counts as "outside".
+    // never counts as "outside". Anything that reaches this far (the LCD
+    // and the track list both stop their own clicks first) also counts as
+    // "outside the track list", so it closes that too.
     <div
       className="turntable"
-      onClick={(e) => e.stopPropagation()}
+      onClick={(e) => {
+        e.stopPropagation();
+        onCloseTracklist();
+      }}
     >
       <span className="turntable-screw turntable-screw-tl" />
       <span className="turntable-screw turntable-screw-tr" />
@@ -425,7 +449,14 @@ export default function Turntable({
         className="deck"
         ref={deckRef}
       >
-        <TimeDisplay seconds={elapsedSeconds} />
+        <TimeDisplay seconds={elapsedSeconds} onClick={onToggleTracklist} />
+        {tracklistOpen && album && (
+          <Tracklist
+            album={album}
+            currentTrackIndex={currentTrackIndex}
+            onSelectTrack={onSelectTrack}
+          />
+        )}
 
         <div
           className="platter"

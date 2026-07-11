@@ -8,23 +8,13 @@ import "swiper/css";
 import "swiper/css/effect-cards";
 import type { Swiper as SwiperClass } from "swiper/types";
 import type { Album } from "./RecordPlayer";
-import AlbumSleeveBack from "./AlbumSleeveBack";
 
 type Props = {
   albums: Album[];
   hiddenDiscIds: string[];
-  /** The id of whichever album is currently on the platter — its card shows
-   *  a flipped-over sleeve back (blurred cover + track list) instead of the
-   *  plain cover, since the record itself isn't in the sleeve right now. */
-  loadedAlbumId: string | undefined;
-  /** Which track of the loaded album is playing, to highlight it in that
-   *  flipped sleeve's track list */
-  currentTrackIndex: number;
   /** Fully revealed vs. just peeking at the bottom edge */
   expanded: boolean;
   onSelect: (index: number) => void;
-  /** Picking a track directly from the loaded album's flipped sleeve */
-  onSelectTrack: (trackIndex: number) => void;
   onActivity: () => void;
   /** An upward swipe on the peeked caption — desktop gets this for free
    *  via :hover, so this only really fires on touch */
@@ -41,14 +31,21 @@ type Props = {
 // an incidental wobble while tapping the caption handle.
 const SWIPE_REVEAL_THRESHOLD_PX = 24;
 
+// Mirrors the `@media (hover: hover) and (pointer: fine)` gate in
+// globals.css that scopes hover-to-reveal to desktop. On anything without
+// that (touch, coarse-pointer), the carousel only ever reveals itself via
+// JS-driven `expanded` state — never implicitly from a hover the device
+// can't produce — so a tap has to be treated as "reveal first" rather than
+// an actual selection.
+const isTouchOnlyDevice = () =>
+  typeof window !== "undefined" &&
+  !window.matchMedia("(hover: hover) and (pointer: fine)").matches;
+
 export default function AlbumCarousel({
   albums,
   hiddenDiscIds,
-  loadedAlbumId,
-  currentTrackIndex,
   expanded,
   onSelect,
-  onSelectTrack,
   onActivity,
   onExpand,
   onCollapse,
@@ -116,9 +113,16 @@ export default function AlbumCarousel({
         onSwiper={onSwiper}
         onClick={(swiper) => {
           const index = swiper.clickedIndex;
-          if (typeof index === "number" && !Number.isNaN(index)) {
-            onSelect(index);
+          if (typeof index !== "number" || Number.isNaN(index)) return;
+          // Touch has no hover to preview the stack first — the first tap
+          // on a collapsed carousel just reveals it, same as the caption
+          // swipe, instead of immediately loading whatever card it landed
+          // on. Once expanded, taps select normally.
+          if (!expanded && isTouchOnlyDevice()) {
+            onExpand();
+            return;
           }
+          onSelect(index);
         }}
         className="album-swiper"
       >
@@ -164,19 +168,6 @@ export default function AlbumCarousel({
                   alt=""
                 />
               </span>
-              {loadedAlbumId === album.id && (
-                // The record itself isn't in its sleeve right now — it's
-                // out on the platter — so show the sleeve's flipped-over
-                // back instead: a scrollable track list tinted with the
-                // cover's average color, like flipping a real record
-                // jacket over to read the songs while it spins.
-                <AlbumSleeveBack
-                  album={album}
-                  currentTrackIndex={currentTrackIndex}
-                  onSelectTrack={onSelectTrack}
-                />
-              )}
-
               <img
                 className="album-sleeve"
                 src={album.cover}
@@ -193,6 +184,15 @@ export default function AlbumCarousel({
           onPointerMove={handleCaptionPointerMove}
           onPointerUp={handleCaptionPointerEnd}
           onPointerCancel={handleCaptionPointerEnd}
+          onClick={(e) => {
+            // A plain tap (no swipe) on the peeked caption — the only
+            // visible handle when collapsed — should reveal the carousel
+            // too, not just the deliberate upward swipe.
+            if (!expanded) {
+              e.stopPropagation();
+              onExpand();
+            }
+          }}
         >
           <span className="album-title">{activeAlbum.title}</span>
         </div>

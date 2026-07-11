@@ -86,6 +86,9 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
   const [browsingAlbum, setBrowsingAlbum] = useState<Album | undefined>(
     undefined,
   );
+  // Whether the floating track list (under the deck's LCD) is open — off
+  // by default; only tapping the LCD (see toggleTracklist) reveals it.
+  const [tracklistOpen, setTracklistOpen] = useState(false);
 
   const albums = useMemo(
     () => [...baseAlbums, ...spotifyAlbums],
@@ -164,6 +167,24 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
       expandCarousel();
     }
   };
+
+  // Tapping the deck's LCD opens/closes the floating track list — a no-op
+  // with nothing on the platter.
+  const toggleTracklist = () => {
+    if (!loadedAlbum) return;
+    setTracklistOpen((open) => !open);
+  };
+
+  // Pressing anywhere outside the track list closes it — the deck (via
+  // Turntable's onCloseTracklist) and the background/carousel (below,
+  // alongside toggleCarousel) both call this.
+  const closeTracklist = () => setTracklistOpen(false);
+
+  // A fresh disc (or the platter emptying out) never inherits the previous
+  // album's open/closed track list state.
+  useEffect(() => {
+    setTracklistOpen(false);
+  }, [loadedIndex]);
 
   // Start the inactivity clock for the carousel's initial expanded state
   useEffect(() => {
@@ -643,10 +664,9 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
 
   // Actually drops the needle onto a track's start groove and starts it —
   // shared by the tonearm (seekTrack, below, which requires the motor
-  // already running) and the sleeve's flipped-over track list
-  // (selectTrackFromSleeve, further below, which turns the motor on for you
-  // instead of no-op'ing). Callers must have already checked
-  // loadedAlbum/busy.
+  // already running) and the floating track list (selectTrackFromList,
+  // further below, which turns the motor on for you instead of no-op'ing).
+  // Callers must have already checked loadedAlbum/busy.
   //
   // iOS Safari only allows audio.play() to succeed when it's called
   // synchronously inside a user-gesture handler. Both callers invoke this
@@ -697,14 +717,14 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
     dropNeedleOnTrack(index);
   };
 
-  // Picking a track from the sleeve's flipped-over track list. If a song
-  // is already playing, treat it like skipping to that track (same as the
-  // tonearm's needle-drop). Otherwise this is just browsing — move the
-  // needle onto that groove and leave it paused there rather than forcing
-  // playback to start; the engine-driving effect above still keeps the
-  // right source loaded and ready, so pressing play afterwards resumes
-  // from exactly this track.
-  const selectTrackFromSleeve = (index: number) => {
+  // Picking a track from the floating track list. If a song is already
+  // playing, treat it like skipping to that track (same as the tonearm's
+  // needle-drop). Otherwise this is just browsing — move the needle onto
+  // that groove and leave it paused there rather than forcing playback to
+  // start; the engine-driving effect above still keeps the right source
+  // loaded and ready, so pressing play afterwards resumes from exactly
+  // this track.
+  const selectTrackFromList = (index: number) => {
     if (!loadedAlbum || busy) return;
     if (status === "playing") {
       dropNeedleOnTrack(index);
@@ -880,10 +900,14 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
 
   return (
     // Tapping the background (anywhere the deck, carousel, and connect
-    // button don't themselves capture) reveals the library.
+    // button don't themselves capture) reveals the library and closes the
+    // track list, if it's open.
     <div
       className="player"
-      onClick={toggleCarousel}
+      onClick={() => {
+        toggleCarousel();
+        closeTracklist();
+      }}
     >
       <SiteBackground cover={backgroundAlbum?.cover} />
       <div className="background-tap-zone" />
@@ -902,6 +926,11 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
         onToggleTable={toggleTable}
         onScrub={handleScrub}
         onScrubEnd={handleScrubEnd}
+        onToggleTracklist={toggleTracklist}
+        tracklistOpen={tracklistOpen}
+        currentTrackIndex={trackIndex}
+        onSelectTrack={selectTrackFromList}
+        onCloseTracklist={closeTracklist}
       />
       {spotifyAuthed ? null : (
         <button
@@ -917,11 +946,8 @@ export default function RecordPlayer({ albums: baseAlbums }: Props) {
       <AlbumCarousel
         albums={albums}
         hiddenDiscIds={hiddenDiscIds}
-        loadedAlbumId={loadedAlbum?.id}
-        currentTrackIndex={trackIndex}
         expanded={carouselExpanded}
         onSelect={selectAlbum}
-        onSelectTrack={selectTrackFromSleeve}
         onActivity={handleCarouselActivity}
         onExpand={expandCarousel}
         onCollapse={collapseCarousel}
